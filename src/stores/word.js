@@ -98,8 +98,8 @@ export const useWordStore = defineStore('word', () => {
     return await contextTranslationService.set(wordId, articleId, translation)
   }
 
-  async function toggleMark(wordId, articleId) {
-    const isNowMarked = await wordMarkService.toggleMark(wordId, articleId)
+  async function toggleMark(wordId, articleId, occKey = '0') {
+    const isNowMarked = await wordMarkService.toggleMark(wordId, articleId, occKey)
     if (isNowMarked) {
       const word = await wordService.getById(wordId)
       if (word && !markedWords.value.find(w => w.id === wordId)) {

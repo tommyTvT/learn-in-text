@@ -19,10 +19,11 @@ function getModel() {
 }
 
 function chatOptions(options) {
+  const settings = useSettingsStore()
   return {
     ...options,
     thinking: { type: 'disabled' },
-    timeout: 30000
+    timeout: (settings.requestTimeout || 30) * 1000
   }
 }
 
@@ -49,7 +50,7 @@ export async function generateWordBasicInfo(word) {
       { role: 'user', content: `请提供单词 "${word}" 的详细信息` }
     ],
     response_format: { type: 'json_object' },
-    max_tokens: 300
+    max_tokens: useSettingsStore().basicInfoMaxTokens || 300
   }))
 
   return JSON.parse(response.choices[0].message.content)
@@ -83,13 +84,17 @@ export async function generateWordContextTranslation(word, context) {
       { role: 'user', content: `上下文："${context}"\n\n请翻译句子并标记单词 "${word}" 对应的中文` }
     ],
     response_format: { type: 'json_object' },
-    max_tokens: 200
+    max_tokens: useSettingsStore().contextMaxTokens || 200
   }))
 
   return JSON.parse(response.choices[0].message.content)
 }
 
-export async function batchGenerateWords(words, onProgress, concurrency = 50) {
+export async function batchGenerateWords(words, onProgress, concurrency) {
+  const settings = useSettingsStore()
+  if (!concurrency) {
+    concurrency = settings.maxConcurrency || 50
+  }
   const results = []
   let completed = 0
   const total = words.length
@@ -146,7 +151,8 @@ ${topic ? `3. 文章主题：${topic}` : ''}
 
 请直接返回文章内容，不需要额外解释。`
       }
-    ]
+    ],
+    max_tokens: useSettingsStore().articleMaxTokens || 2000
   }))
 
   return response.choices[0].message.content

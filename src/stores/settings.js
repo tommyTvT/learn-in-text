@@ -13,6 +13,16 @@ export const AI_PROVIDERS = {
 
 const CUSTOM = 'custom'
 const THEMES = ['system', 'light', 'dark']
+const DEFAULT_MAX_CONCURRENCY = 50
+const DEFAULT_BASIC_INFO_MAX_TOKENS = 300
+const DEFAULT_CONTEXT_MAX_TOKENS = 200
+const DEFAULT_ARTICLE_MAX_TOKENS = 2000
+const DEFAULT_REQUEST_TIMEOUT = 30
+
+function toPositiveNumber(value, fallback) {
+  const num = Number(value)
+  return Number.isFinite(num) && num > 0 ? num : fallback
+}
 
 function systemPrefersDark() {
   return window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -24,6 +34,11 @@ export const useSettingsStore = defineStore('settings', () => {
   const aiApiKey = ref('')
   const aiModel = ref('')
   const theme = ref('system')
+  const maxConcurrency = ref(DEFAULT_MAX_CONCURRENCY)
+  const basicInfoMaxTokens = ref(DEFAULT_BASIC_INFO_MAX_TOKENS)
+  const contextMaxTokens = ref(DEFAULT_CONTEXT_MAX_TOKENS)
+  const articleMaxTokens = ref(DEFAULT_ARTICLE_MAX_TOKENS)
+  const requestTimeout = ref(DEFAULT_REQUEST_TIMEOUT)
 
   const selectedProvider = computed(() => AI_PROVIDERS[aiProvider.value] || null)
   const isPreset = computed(() => aiProvider.value !== CUSTOM)
@@ -85,6 +100,11 @@ export const useSettingsStore = defineStore('settings', () => {
         } else {
           applyProvider('deepseek')
         }
+        maxConcurrency.value = toPositiveNumber(data.maxConcurrency, DEFAULT_MAX_CONCURRENCY)
+        basicInfoMaxTokens.value = toPositiveNumber(data.basicInfoMaxTokens, DEFAULT_BASIC_INFO_MAX_TOKENS)
+        contextMaxTokens.value = toPositiveNumber(data.contextMaxTokens, DEFAULT_CONTEXT_MAX_TOKENS)
+        articleMaxTokens.value = toPositiveNumber(data.articleMaxTokens, DEFAULT_ARTICLE_MAX_TOKENS)
+        requestTimeout.value = toPositiveNumber(data.requestTimeout, DEFAULT_REQUEST_TIMEOUT)
       } else {
         applyProvider('deepseek')
       }
@@ -101,7 +121,12 @@ export const useSettingsStore = defineStore('settings', () => {
         aiEndpoint: aiEndpoint.value,
         aiApiKey: aiApiKey.value,
         aiModel: aiModel.value,
-        theme: theme.value
+        theme: theme.value,
+        maxConcurrency: maxConcurrency.value,
+        basicInfoMaxTokens: basicInfoMaxTokens.value,
+        contextMaxTokens: contextMaxTokens.value,
+        articleMaxTokens: articleMaxTokens.value,
+        requestTimeout: requestTimeout.value
       }))
     } catch (e) {
       console.error('保存设置失败:', e)
@@ -118,7 +143,12 @@ export const useSettingsStore = defineStore('settings', () => {
       aiEndpoint: aiEndpoint.value,
       aiApiKey: aiApiKey.value,
       aiModel: aiModel.value,
-      theme: theme.value
+      theme: theme.value,
+      maxConcurrency: maxConcurrency.value,
+      basicInfoMaxTokens: basicInfoMaxTokens.value,
+      contextMaxTokens: contextMaxTokens.value,
+      articleMaxTokens: articleMaxTokens.value,
+      requestTimeout: requestTimeout.value
     }
   }
 
@@ -132,13 +162,18 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.aiApiKey !== undefined) aiApiKey.value = data.aiApiKey
     if (data.aiModel !== undefined) aiModel.value = data.aiModel
     if (THEMES.includes(data.theme)) theme.value = data.theme
+    if (data.maxConcurrency !== undefined) maxConcurrency.value = toPositiveNumber(data.maxConcurrency, DEFAULT_MAX_CONCURRENCY)
+    if (data.basicInfoMaxTokens !== undefined) basicInfoMaxTokens.value = toPositiveNumber(data.basicInfoMaxTokens, DEFAULT_BASIC_INFO_MAX_TOKENS)
+    if (data.contextMaxTokens !== undefined) contextMaxTokens.value = toPositiveNumber(data.contextMaxTokens, DEFAULT_CONTEXT_MAX_TOKENS)
+    if (data.articleMaxTokens !== undefined) articleMaxTokens.value = toPositiveNumber(data.articleMaxTokens, DEFAULT_ARTICLE_MAX_TOKENS)
+    if (data.requestTimeout !== undefined) requestTimeout.value = toPositiveNumber(data.requestTimeout, DEFAULT_REQUEST_TIMEOUT)
     applyTheme()
     saveSettings()
   }
 
   loadSettings()
 
-  watch([aiProvider, aiEndpoint, aiApiKey, aiModel, theme], saveSettings)
+  watch([aiProvider, aiEndpoint, aiApiKey, aiModel, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout], saveSettings)
 
   return {
     aiProvider,
@@ -146,6 +181,11 @@ export const useSettingsStore = defineStore('settings', () => {
     aiApiKey,
     aiModel,
     theme,
+    maxConcurrency,
+    basicInfoMaxTokens,
+    contextMaxTokens,
+    articleMaxTokens,
+    requestTimeout,
     selectedProvider,
     isPreset,
     isDark,

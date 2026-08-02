@@ -228,6 +228,22 @@ export function getWordContext(text, word) {
   return text.substring(start, end).trim()
 }
 
+export function getAllOccKeys(text) {
+  const keys = []
+  const counts = {}
+  const wordRegex = /[a-zA-Z]+(?:'[a-zA-Z]+)?/g
+  let match
+  while ((match = wordRegex.exec(text)) !== null) {
+    const word = match[0].toLowerCase()
+    if (word.length > 1) {
+      const count = counts[word] || 0
+      counts[word] = count + 1
+      keys.push(`${word}:${count}`)
+    }
+  }
+  return keys
+}
+
 export function lemmatize(word) {
   const rules = [
     { suffix: 'ies', replace: 'y' },

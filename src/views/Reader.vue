@@ -21,11 +21,11 @@ const wordInfo = ref(null)
 const loadingWord = ref(false)
 const loadingContext = ref(false)
 const articleWords = ref([])
-const crossMarkedWords = ref(new Set())
 const saving = ref(false)
 
 const localMarks = ref(new Set())
 const dbMarks = ref(new Set())
+const activeRedKey = ref(null)
 const contextTranslation = ref(null)
 const contextError = ref(false)
 
@@ -66,9 +66,9 @@ onMounted(async () => {
   await loadArticleWords()
   if (isManagement.value) {
     const marks = await wordMarkService.getByArticle(articleId.value)
-    const markedIds = new Set(marks.map(m => m.wordId))
-    localMarks.value = markedIds
-    dbMarks.value = new Set(markedIds)
+    const markedKeys = new Set(marks.map(m => m.occKey))
+    localMarks.value = markedKeys
+    dbMarks.value = new Set(markedKeys)
   }
   await autoGenerateAllWords()
 })
@@ -85,14 +85,19 @@ async function loadArticleWords() {
 async function saveMarks() {
   saving.value = true
   try {
-    const toAdd = [...localMarks.value].filter(id => !dbMarks.value.has(id))
-    const toRemove = [...dbMarks.value].filter(id => !localMarks.value.has(id))
+    const occKeyWordMap = buildOccKeyWordMap()
 
-    for (const wordId of toAdd) {
-      await wordMarkService.add(wordId, articleId.value)
+    const toAdd = [...localMarks.value].filter(key => !dbMarks.value.has(key))
+    const toRemove = [...dbMarks.value].filter(key => !localMarks.value.has(key))
+
+    for (const occKey of toAdd) {
+      const wordId = occKeyWordMap.get(occKey)
+      if (wordId) {
+        await wordMarkService.add(wordId, articleId.value, occKey)
+      }
     }
-    for (const wordId of toRemove) {
-      await wordMarkService.remove(wordId, articleId.value)
+    for (const occKey of toRemove) {
+      await wordMarkService.remove(articleId.value, occKey)
     }
 
     dbMarks.value = new Set(localMarks.value)
@@ -104,10 +109,48 @@ async function saveMarks() {
   }
 }
 
-async function handleWordClick(event, word) {
+function buildOccKeyWordMap() {
+  const map = new Map()
+  for (const paragraphParts of renderContent()) {
+    for (const part of paragraphParts) {
+      if (part.type === 'word' && !map.has(part.occKey)) {
+        const wordData = articleWords.value.find(w => w.word === part.word)
+        if (wordData) {
+          map.set(part.occKey, wordData.id)
+        }
+      }
+    }
+  }
+  return map
+}
+
+function getMarkedWordIdsInArticle() {
+  const wordIds = new Set()
+  const occKeyWordMap = buildOccKeyWordMap()
+  for (const occKey of localMarks.value) {
+    const wordId = occKeyWordMap.get(occKey)
+    if (wordId) {
+      wordIds.add(wordId)
+    }
+  }
+  return wordIds
+}
+
+async function handleWordClick(event, part) {
   event.preventDefault()
-  const wordData = await wordStore.getOrCreateWord(word.toLowerCase())
-  const isMarked = localMarks.value.has(wordData.id)
+  const wordData = await wordStore.getOrCreateWord(part.word)
+  const markedHereBefore = getMarkedWordIdsInArticle().has(wordData.id)
+  const otherArticleIds = await wordMarkService.getMarkedArticleIds(wordData.id)
+  const markedElsewhere = otherArticleIds.some(a => a !== articleId.value)
+
+  if (!localMarks.value.has(part.occKey)) {
+    const newLocalMarks = new Set(localMarks.value)
+    newLocalMarks.add(part.occKey)
+    localMarks.value = newLocalMarks
+  }
+
+  activeRedKey.value = (markedHereBefore || markedElsewhere) ? part.occKey : null
+
   const rect = event.target.getBoundingClientRect()
   wordPosition.value = {
     wordRect: {
@@ -119,16 +162,13 @@ async function handleWordClick(event, word) {
       height: rect.height
     }
   }
-  selectedWord.value = word
-  loadWordDetails(word)
-  if (!isMarked) {
-    toggleMark(word)
-  }
+  selectedWord.value = part.word
+  loadWordDetails(part.word)
 }
 
-async function handleWordRightClick(event, word) {
+async function handleWordRightClick(event, part) {
   event.preventDefault()
-  await toggleMark(word)
+  await toggleMark(part)
 }
 
 let wordDetailRequestId = 0
@@ -159,24 +199,17 @@ async function loadWordDetails(word) {
   }
 }
 
-async function toggleMark(word) {
-  const wordData = await wordStore.getOrCreateWord(word)
+async function toggleMark(part) {
   const newLocalMarks = new Set(localMarks.value)
-  const newCrossMarks = new Set(crossMarkedWords.value)
-
-  if (newLocalMarks.has(wordData.id)) {
-    newLocalMarks.delete(wordData.id)
-    newCrossMarks.delete(wordData.word)
+  if (newLocalMarks.has(part.occKey)) {
+    newLocalMarks.delete(part.occKey)
   } else {
-    newLocalMarks.add(wordData.id)
-    const otherArticleIds = await wordMarkService.getMarkedArticleIds(wordData.id)
-    if (otherArticleIds.length > 0) {
-      newCrossMarks.add(wordData.word)
-    }
+    newLocalMarks.add(part.occKey)
   }
-
   localMarks.value = newLocalMarks
-  crossMarkedWords.value = newCrossMarks
+  if (activeRedKey.value === part.occKey) {
+    activeRedKey.value = null
+  }
 }
 
 async function generateBasicInfo(word) {
@@ -242,6 +275,7 @@ function closePopup() {
   wordInfo.value = null
   contextTranslation.value = null
   contextError.value = false
+  activeRedKey.value = null
 }
 
 async function autoGenerateAllWords() {
@@ -282,22 +316,20 @@ async function autoGenerateAllWords() {
   }
 }
 
-function getWordHighlight(word) {
-  const lower = word.toLowerCase()
-  const wordData = articleWords.value.find(w => w.word === lower)
-  const wordId = wordData?.id
-
-  if (wordId && localMarks.value.has(wordId)) {
-    if (crossMarkedWords.value.has(lower)) {
-      return 'bg-yellow-300 dark:bg-yellow-500/80 text-yellow-900 dark:text-yellow-950 underline decoration-red-500 decoration-2'
-    }
+function getWordHighlight(part) {
+  if (part.occKey === activeRedKey.value) {
+    return 'bg-red-300 dark:bg-red-500/80 text-red-900 dark:text-red-950'
+  }
+  if (localMarks.value.has(part.occKey)) {
     return 'bg-yellow-300 dark:bg-yellow-500/80 text-yellow-900 dark:text-yellow-950'
   }
-
   return ''
 }
 
-function getWordHighlightHover(word) {
+function getWordHighlightHover(part) {
+  if (part.occKey === activeRedKey.value) {
+    return 'hover:bg-red-200 dark:hover:bg-red-500/40'
+  }
   return 'hover:bg-yellow-200 dark:hover:bg-yellow-500/40'
 }
 
@@ -306,6 +338,7 @@ function renderContent() {
   const paragraphs = parseArticle(article.value.content).paragraphs
   const parts = []
   const wordRegex = /[a-zA-Z]+(?:'[a-zA-Z]+)?/g
+  const occCounts = {}
   let match
 
   for (const paragraph of paragraphs) {
@@ -321,10 +354,13 @@ function renderContent() {
             content: paragraph.substring(lastIndex, match.index)
           })
         }
+        const count = occCounts[word] || 0
+        occCounts[word] = count + 1
         paragraphParts.push({
           type: 'word',
           content: match[0],
-          word: word
+          word: word,
+          occKey: `${word}:${count}`
         })
         lastIndex = match.index + match[0].length
       }
@@ -395,12 +431,12 @@ function renderContent() {
               <span v-if="part.type === 'text'">{{ part.content }}</span>
               <span
                 v-else
-                @click="handleWordClick($event, part.word)"
-                @contextmenu="handleWordRightClick($event, part.word)"
+                @click="handleWordClick($event, part)"
+                @contextmenu="handleWordRightClick($event, part)"
                 :class="[
                   'cursor-pointer transition-colors rounded px-0.5',
-                  getWordHighlightHover(part.word),
-                  getWordHighlight(part.word)
+                  getWordHighlightHover(part),
+                  getWordHighlight(part)
                 ]"
               >{{ part.content }}</span>
             </template>

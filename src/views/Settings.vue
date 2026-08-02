@@ -311,6 +311,76 @@ onMounted(() => {
           </div>
 
           <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+            <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300 mb-2">性能限制</h3>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">最大并发数</label>
+                <input
+                  v-model.number="settingsStore.maxConcurrency"
+                  type="number"
+                  min="1"
+                  max="100"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  批量生成单词时同时发起的请求数上限
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">请求超时（秒）</label>
+                <input
+                  v-model.number="settingsStore.requestTimeout"
+                  type="number"
+                  min="1"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  单次AI请求的超时时间，超时自动中止
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">单词信息 max_tokens</label>
+                <input
+                  v-model.number="settingsStore.basicInfoMaxTokens"
+                  type="number"
+                  min="1"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  单词音标与释义请求允许生成的最大 token 数
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">上下文翻译 max_tokens</label>
+                <input
+                  v-model.number="settingsStore.contextMaxTokens"
+                  type="number"
+                  min="1"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  上下文翻译请求允许生成的最大 token 数
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">文章生成 max_tokens</label>
+                <input
+                  v-model.number="settingsStore.articleMaxTokens"
+                  type="number"
+                  min="1"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  文章生成请求允许生成的最大 token 数
+                </p>
+              </div>
+            </div>
+            <p class="text-xs text-gray-500 dark:text-neutral-400 mt-3">
+              修改后自动保存，立即生效
+            </p>
+          </div>
+
+          <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
             <h3 class="text-sm font-medium text-red-700 dark:text-red-400 mb-2">危险操作</h3>
             <div class="flex flex-wrap gap-3">
               <button

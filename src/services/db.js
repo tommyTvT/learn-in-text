@@ -1,5 +1,5 @@
 import Dexie from 'dexie'
-import { commonWordDefinitions } from './parser'
+import { commonWordDefinitions, getAllOccKeys } from './parser'
 
 function splitDefinition(def) {
   const match = def.match(/^((?:[a-z]+\.)+(?:\/(?:[a-z]+\.)+)*)\s*(.+)$/i)
@@ -9,10 +9,10 @@ function splitDefinition(def) {
 
 export const db = new Dexie('LearnInText')
 
-db.version(1).stores({
+db.version(2).stores({
   articles: '++id, title, content, createdAt, updatedAt',
   words: '++id, &word, phonetic, definitions, examples, source, updatedAt',
-  wordMarks: '++id, articleId, wordId, [articleId+wordId], [wordId+articleId], createdAt',
+  wordMarks: '++id, articleId, wordId, occKey, [articleId+wordId], [articleId+occKey], createdAt',
   contextTranslations: '++id, wordId, articleId, &[wordId+articleId], translation, createdAt'
 })
 
@@ -20,7 +20,7 @@ async function ensureSchema() {
   try {
     await db.open()
   } catch (error) {
-    if (error.name === 'VersionError') {
+    if (error.name === 'VersionError' || error.name === 'SchemaError') {
       await Dexie.delete('LearnInText')
       await db.open()
     } else {
@@ -176,6 +176,7 @@ export const wordService = {
           await db.wordMarks.add({
             wordId: wordRecord.id,
             articleId: importArticle.id,
+            occKey: '0',
             createdAt: new Date()
           })
         }
@@ -196,26 +197,26 @@ export const wordMarkService = {
     return [...new Set(marks.map(m => m.articleId))]
   },
 
-  async toggleMark(wordId, articleId) {
-    const existing = await db.wordMarks.where({ wordId, articleId }).first()
+  async toggleMark(wordId, articleId, occKey) {
+    const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (existing) {
       await db.wordMarks.delete(existing.id)
       return false
     } else {
-      await db.wordMarks.add({ wordId, articleId, createdAt: new Date() })
+      await db.wordMarks.add({ wordId, articleId, occKey, createdAt: new Date() })
       return true
     }
   },
 
-  async add(wordId, articleId) {
-    const existing = await db.wordMarks.where({ wordId, articleId }).first()
+  async add(wordId, articleId, occKey) {
+    const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (!existing) {
-      await db.wordMarks.add({ wordId, articleId, createdAt: new Date() })
+      await db.wordMarks.add({ wordId, articleId, occKey, createdAt: new Date() })
     }
   },
 
-  async remove(wordId, articleId) {
-    const existing = await db.wordMarks.where({ wordId, articleId }).first()
+  async remove(articleId, occKey) {
+    const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (existing) {
       await db.wordMarks.delete(existing.id)
     }
@@ -376,10 +377,16 @@ export const exportService = {
       }
 
       const markedSet = new Set((data.markedWords || data.words.map(w => w.word)).map(w => w.toLowerCase()))
+      const occKeys = getAllOccKeys(data.article.content)
       for (let i = 0; i < data.words.length; i++) {
         const wordId = wordIdMap[i]
-        if (wordId && markedSet.has(data.words[i].word.toLowerCase())) {
-          await wordMarkService.add(wordId, articleId)
+        const word = data.words[i].word.toLowerCase()
+        if (wordId && markedSet.has(word)) {
+          for (const occKey of occKeys) {
+            if (occKey.startsWith(`${word}:`)) {
+              await wordMarkService.add(wordId, articleId, occKey)
+            }
+          }
         }
       }
     })
@@ -458,17 +465,18 @@ export const exportService = {
       }
 
       const existingMarks = await db.wordMarks.toArray()
-      const markSet = new Set(existingMarks.map(m => `${m.wordId}_${m.articleId}`))
+      const markSet = new Set(existingMarks.map(m => `${m.wordId}_${m.articleId}_${m.occKey}`))
 
       for (const m of wordMarks) {
         const wordId = wordIdMap[m.wordId]
         const articleId = articleIdMap[m.articleId]
         if (wordId && articleId) {
-          const key = `${wordId}_${articleId}`
+          const key = `${wordId}_${articleId}_${m.occKey}`
           if (!markSet.has(key)) {
             await db.wordMarks.add({
               wordId,
               articleId,
+              occKey: m.occKey || '0',
               createdAt: m.createdAt || new Date()
             })
             markSet.add(key)
