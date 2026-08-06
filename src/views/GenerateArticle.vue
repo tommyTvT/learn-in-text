@@ -103,10 +103,6 @@ function onFileUpload(event) {
 }
 
 async function generate() {
-  if (words.value.length === 0) {
-    alert('请先选择要包含的单词')
-    return
-  }
   if (mode.value === 'essay' && essayType.value === 'long') {
     if (!sourceArticle.value.trim()) {
       alert('读后续写必须提供原文材料（粘贴或上传 .txt）')
@@ -187,7 +183,7 @@ async function saveArticle() {
       </button>
       <div>
         <h1 class="text-3xl font-bold text-gray-900 dark:text-neutral-100">AI 生成文章</h1>
-        <p class="text-gray-600 dark:text-neutral-400 mt-1">基于已选单词，定制一篇专属英语阅读文章</p>
+        <p class="text-gray-600 dark:text-neutral-400 mt-1">配置参数，定制一篇专属英语阅读文章（单词可选）</p>
       </div>
     </div>
 
@@ -221,7 +217,10 @@ async function saveArticle() {
         <div class="space-y-5">
           <div>
             <div class="flex items-center justify-between mb-1">
-              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300">包含单词</label>
+              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300">
+                包含单词
+                <span class="text-xs text-gray-400 dark:text-neutral-500">（可选）</span>
+              </label>
               <button
                 v-if="words.length > 0"
                 @click="clearWords"
@@ -234,7 +233,7 @@ async function saveArticle() {
               v-if="words.length === 0"
               class="px-3 py-2.5 rounded-md bg-gray-50 dark:bg-neutral-800 border border-dashed border-gray-300 dark:border-neutral-700 text-sm text-gray-500 dark:text-neutral-400"
             >
-              未选择单词，请先到<a @click="router.push('/vocabulary')" class="text-blue-600 dark:text-blue-400 hover:underline mx-0.5">词库页</a>勾选单词再进入
+              未选择单词，可前往<a @click="router.push('/vocabulary')" class="text-blue-600 dark:text-blue-400 hover:underline mx-0.5">词库页</a>勾选，或直接生成自由命题文章
             </div>
             <div v-else class="flex flex-wrap gap-2">
               <span
@@ -357,7 +356,7 @@ async function saveArticle() {
 
           <button
             @click="generate"
-            :disabled="generating || words.length === 0"
+            :disabled="generating"
             class="w-full bg-purple-600 text-white py-2.5 px-4 rounded-md hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {{ generating ? '生成中...' : '生成文章' }}
