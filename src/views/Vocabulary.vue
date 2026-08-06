@@ -1,7 +1,6 @@
 ﻿<script setup>
 import { ref, onMounted, computed } from 'vue'
 import { useWordStore } from '../stores/word'
-import { generateArticle } from '../services/ai'
 import { useRouter } from 'vue-router'
 import { useArticleStore } from '../stores/article'
 
@@ -13,10 +12,6 @@ const searchQuery = ref('')
 const sortBy = ref('updatedAt')
 const selectedWords = ref([])
 const expandedArticles = ref(new Set())
-const showGenerateModal = ref(false)
-const generateTopic = ref('')
-const generateStyle = ref('general')
-const generating = ref(false)
 
 onMounted(async () => {
   await articleStore.fetchArticles()
@@ -162,34 +157,17 @@ function importWords(event) {
   reader.readAsText(file)
 }
 
-async function generateAIArticle() {
-  if (selectedWords.value.length === 0) {
-    alert('请先选择单词')
-    return
-  }
-
-  generating.value = true
-  try {
-    const words = selectedWords.value.map(id => {
-      const word = wordStore.markedWords.find(w => w.id === id)
-      return word.word
-    })
-
-    const content = await generateArticle(words, generateTopic.value, generateStyle.value)
-    const title = `AI生成文章 - ${new Date().toLocaleDateString('zh-CN')}`
-
-    const article = await articleStore.createArticle({ title, content })
-    showGenerateModal.value = false
-    router.push(`/reader/${article.id}`)
-  } catch (error) {
-    alert('生成失败: ' + error.message)
-  } finally {
-    generating.value = false
-  }
+function goToGenerate() {
+  if (selectedWords.value.length === 0) return
+  const spellings = selectedWords.value.map(id => {
+    const word = wordStore.markedWords.find(w => w.id === id)
+    return word ? word.word : ''
+  }).filter(Boolean)
+  router.push({ path: '/generate', query: { words: spellings.join(',') } })
 }
 
 function goToArticle(articleId) {
-  router.push(`/reader/${articleId}?fromVocab=1`)
+  router.push(`/reader/${articleId}?mode=view`)
 }
 
 function formatDate(date) {
@@ -257,7 +235,7 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
           删除选中 ({{ selectedWords.length }})
         </button>
         <button
-          @click="showGenerateModal = true"
+          @click="goToGenerate"
           :disabled="selectedWords.length === 0"
           class="px-3 py-1.5 text-sm bg-purple-100 dark:bg-neutral-800 text-purple-700 dark:text-neutral-300 rounded-md hover:bg-purple-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
@@ -296,7 +274,7 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
       >
         <div
           @click="toggleArticle(article.id)"
-          class="px-6 py-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors flex items-center justify-between"
+          class="px-4 sm:px-6 py-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors flex items-center justify-between gap-2 flex-wrap"
         >
           <div class="flex items-center gap-3 min-w-0">
             <svg
@@ -312,7 +290,7 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
             </svg>
             <h3 class="font-semibold text-gray-900 dark:text-neutral-100 truncate">{{ article.title }}</h3>
           </div>
-          <div class="flex items-center gap-3 flex-shrink-0">
+          <div class="flex items-center gap-3 flex-shrink-0 flex-wrap justify-end">
             <span class="text-sm text-gray-500 dark:text-neutral-400">
               {{ getArticleWords(article.id).length }} 个单词
             </span>
@@ -323,7 +301,7 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
               @click.stop="goToArticle(article.id)"
               class="px-2 py-1 text-xs bg-blue-50 dark:bg-neutral-800 text-blue-600 dark:text-neutral-300 rounded hover:bg-blue-100 dark:hover:bg-neutral-700"
             >
-              查看原文
+              管理模式
             </button>
             <button
               @click.stop="exportArticleTxt(article.id, article.title)"
@@ -335,7 +313,7 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
           </div>
         </div>
 
-        <div v-if="isArticleExpanded(article.id)" class="px-6 pb-4 border-t border-gray-100 dark:border-neutral-800">
+        <div v-if="isArticleExpanded(article.id)" class="px-4 sm:px-6 pb-4 border-t border-gray-100 dark:border-neutral-800">
           <div v-if="getArticleWords(article.id).length === 0" class="py-4 text-sm text-gray-400 dark:text-neutral-500 text-center">
             该文章中没有匹配的单词
           </div>
@@ -394,57 +372,6 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
                 </span>
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div
-      v-if="showGenerateModal"
-      class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-    >
-      <div class="bg-white dark:bg-neutral-900 rounded-lg p-6 max-w-md w-full mx-4">
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-neutral-100 mb-4">AI 生成文章</h3>
-        <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
-          已选择 {{ selectedWords.length }} 个单词
-        </p>
-        <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">文章主题（可选）</label>
-            <input
-              v-model="generateTopic"
-              type="text"
-              placeholder="例如：科技、旅行、美食..."
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">文章风格</label>
-            <select
-              v-model="generateStyle"
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="general">通用</option>
-              <option value="story">故事</option>
-              <option value="news">新闻</option>
-              <option value="academic">学术</option>
-              <option value="dialogue">对话</option>
-            </select>
-          </div>
-          <div class="flex space-x-3">
-            <button
-              @click="generateAIArticle"
-              :disabled="generating"
-              class="flex-1 bg-purple-600 text-white py-2 px-4 rounded-md hover:bg-purple-700 disabled:opacity-50"
-            >
-              {{ generating ? '生成中...' : '生成' }}
-            </button>
-            <button
-              @click="showGenerateModal = false"
-              class="flex-1 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 py-2 px-4 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
-            >
-              取消
-            </button>
           </div>
         </div>
       </div>

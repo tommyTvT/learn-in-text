@@ -205,12 +205,19 @@ export function parseArticle(text) {
   }
 }
 
-export function getWordContext(text, word) {
-  const wordRegex = new RegExp(`\\b${word}\\b`, 'i')
-  const match = text.match(wordRegex)
-  if (!match) return ''
-
-  const wordIndex = match.index
+export function getWordContext(text, word, maxWords = 0, occurrence = 0) {
+  const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
+  let match
+  let count = 0
+  let wordIndex = -1
+  while ((match = wordRegex.exec(text)) !== null) {
+    if (count === occurrence) {
+      wordIndex = match.index
+      break
+    }
+    count++
+  }
+  if (wordIndex < 0) return ''
   const wordLength = word.length
 
   const sentenceEnders = /[.!?]/
@@ -225,7 +232,20 @@ export function getWordContext(text, word) {
   }
   if (end < text.length) end++
 
-  return text.substring(start, end).trim()
+  let context = text.substring(start, end).trim()
+
+  if (maxWords > 0) {
+    const words = context.split(/\s+/)
+    if (words.length > maxWords) {
+      const targetIdx = words.findIndex(w => new RegExp(`^${word}`, 'i').test(w))
+      const target = targetIdx >= 0 ? targetIdx : 0
+      const half = Math.floor(maxWords / 2)
+      const from = Math.max(0, target - half)
+      context = words.slice(from, from + maxWords).join(' ')
+    }
+  }
+
+  return context
 }
 
 export function getAllOccKeys(text) {

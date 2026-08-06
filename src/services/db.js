@@ -9,18 +9,18 @@ function splitDefinition(def) {
 
 export const db = new Dexie('LearnInText')
 
-db.version(2).stores({
+db.version(5).stores({
   articles: '++id, title, content, createdAt, updatedAt',
-  words: '++id, &word, phonetic, definitions, examples, source, updatedAt',
+  words: '++id, &[word+articleId], word, articleId, definitions, examples, source, updatedAt',
   wordMarks: '++id, articleId, wordId, occKey, [articleId+wordId], [articleId+occKey], createdAt',
-  contextTranslations: '++id, wordId, articleId, &[wordId+articleId], translation, createdAt'
+  contextTranslations: '++id, wordId, articleId, occKey, &[wordId+articleId+occKey], translation, createdAt'
 })
 
 async function ensureSchema() {
   try {
     await db.open()
   } catch (error) {
-    if (error.name === 'VersionError' || error.name === 'SchemaError') {
+    if (error.name === 'VersionError' || error.name === 'SchemaError' || error.name === 'ConstraintError') {
       await Dexie.delete('LearnInText')
       await db.open()
     } else {
@@ -59,9 +59,10 @@ export const articleService = {
   },
 
   async delete(id) {
-    await db.transaction('rw', db.articles, db.wordMarks, db.contextTranslations, async () => {
+    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, async () => {
       await db.wordMarks.where('articleId').equals(id).delete()
       await db.contextTranslations.where('articleId').equals(id).delete()
+      await db.words.where('articleId').equals(id).delete()
       await db.articles.delete(id)
     })
   }
@@ -81,18 +82,24 @@ export const wordService = {
     return await db.words.where('id').anyOf(ids).toArray()
   },
 
-  async getByWord(word) {
-    return await db.words.where('word').equals(word.toLowerCase()).first()
+  async getByWord(word, articleId) {
+    const lower = word.toLowerCase()
+    return await db.words.where({ word: lower, articleId }).first()
   },
 
-  async getOrCreate(word) {
+  async getByWordAllArticles(word) {
     const lower = word.toLowerCase()
-    let existing = await this.getByWord(lower)
+    return await db.words.where('word').equals(lower).toArray()
+  },
+
+  async getOrCreate(word, articleId) {
+    const lower = word.toLowerCase()
+    let existing = await this.getByWord(lower, articleId)
     if (!existing) {
       const commonDef = commonWordDefinitions[lower]
       const id = await db.words.add({
         word: lower,
-        phonetic: commonDef ? commonDef.phonetic : '',
+        articleId,
         definitions: commonDef ? [splitDefinition(commonDef.definition)] : [],
         examples: [],
         source: commonDef ? 'common' : '',
@@ -103,7 +110,6 @@ export const wordService = {
       const commonDef = commonWordDefinitions[existing.word]
       if (commonDef) {
         await db.words.update(existing.id, {
-          phonetic: commonDef.phonetic,
           definitions: [splitDefinition(commonDef.definition)],
           source: 'common',
           updatedAt: new Date()
@@ -130,6 +136,17 @@ export const wordService = {
     })
   },
 
+  async deleteBySpelling(word) {
+    const records = await this.getByWordAllArticles(word)
+    await db.transaction('rw', db.words, db.wordMarks, db.contextTranslations, async () => {
+      for (const record of records) {
+        await db.wordMarks.where('wordId').equals(record.id).delete()
+        await db.contextTranslations.where('wordId').equals(record.id).delete()
+        await db.words.delete(record.id)
+      }
+    })
+  },
+
   async importWords(words) {
     let importArticle = await db.articles.where('title').equals('导入词汇').first()
     if (!importArticle) {
@@ -145,11 +162,10 @@ export const wordService = {
 
     return await db.transaction('rw', db.words, db.wordMarks, async () => {
       for (const word of words) {
-        const existing = await this.getByWord(word.word)
+        const existing = await this.getByWord(word.word, importArticle.id)
         let wordRecord
         if (existing) {
           await db.words.update(existing.id, {
-            phonetic: word.phonetic || existing.phonetic,
             definitions: word.definitions || existing.definitions,
             examples: word.examples || existing.examples,
             source: word.definitions?.length ? 'ai' : existing.source,
@@ -159,7 +175,7 @@ export const wordService = {
         } else {
           const id = await db.words.add({
             word: word.word.toLowerCase(),
-            phonetic: word.phonetic || '',
+            articleId: importArticle.id,
             definitions: word.definitions || [],
             examples: word.examples || [],
             source: word.definitions?.length ? 'ai' : '',
@@ -195,6 +211,14 @@ export const wordMarkService = {
   async getMarkedArticleIds(wordId) {
     const marks = await db.wordMarks.where('wordId').equals(wordId).toArray()
     return [...new Set(marks.map(m => m.articleId))]
+  },
+
+  async getMarkedArticleIdsByWord(word, excludeArticleId) {
+    const records = await wordService.getByWordAllArticles(word)
+    const ids = records.map(r => r.id)
+    if (ids.length === 0) return []
+    const marks = await db.wordMarks.where('wordId').anyOf(ids).toArray()
+    return [...new Set(marks.map(m => m.articleId))].filter(a => a !== excludeArticleId)
   },
 
   async toggleMark(wordId, articleId, occKey) {
@@ -248,20 +272,23 @@ export const wordMarkService = {
     const marks = await db.wordMarks.toArray()
     const map = {}
     for (const m of marks) {
-      if (!map[m.articleId]) map[m.articleId] = []
-      map[m.articleId].push(m.wordId)
+      if (!map[m.articleId]) map[m.articleId] = new Set()
+      map[m.articleId].add(m.wordId)
+    }
+    for (const articleId in map) {
+      map[articleId] = [...map[articleId]]
     }
     return map
   }
 }
 
 export const contextTranslationService = {
-  async get(wordId, articleId) {
-    return await db.contextTranslations.where({ wordId, articleId }).first()
+  async get(wordId, articleId, occKey = '0') {
+    return await db.contextTranslations.where({ wordId, articleId, occKey }).first()
   },
 
-  async set(wordId, articleId, translation) {
-    const existing = await db.contextTranslations.where({ wordId, articleId }).first()
+  async set(wordId, articleId, occKey = '0', translation) {
+    const existing = await db.contextTranslations.where({ wordId, articleId, occKey }).first()
     if (!translation) {
       if (existing) {
         await db.contextTranslations.delete(existing.id)
@@ -275,6 +302,7 @@ export const contextTranslationService = {
       const id = await db.contextTranslations.add({
         wordId,
         articleId,
+        occKey,
         translation,
         createdAt: new Date()
       })
@@ -291,9 +319,8 @@ export const exportService = {
     return {
       version: 2,
       exportDate: new Date().toISOString(),
-      words: words.map(({ word, phonetic, definitions, examples }) => ({
+      words: words.map(({ word, definitions, examples }) => ({
         word,
-        phonetic,
         definitions,
         examples
       }))
@@ -325,9 +352,8 @@ export const exportService = {
         createdAt: article.createdAt,
         updatedAt: article.updatedAt
       },
-      words: words.map(({ word, phonetic, definitions, examples }) => ({
+      words: words.map(({ word, definitions, examples }) => ({
         word,
-        phonetic,
         definitions,
         examples
       })),
@@ -351,12 +377,11 @@ export const exportService = {
     const wordIdMap = []
     await db.transaction('rw', db.words, db.wordMarks, async () => {
       for (const w of data.words) {
-        const existing = await wordService.getByWord(w.word)
+        const existing = await wordService.getByWord(w.word, articleId)
         if (existing) {
           wordIdMap.push(existing.id)
           if (!existing.definitions?.length && w.definitions?.length) {
             await db.words.update(existing.id, {
-              phonetic: w.phonetic,
               definitions: w.definitions,
               examples: w.examples,
               source: 'ai',
@@ -366,7 +391,7 @@ export const exportService = {
         } else {
           const id = await db.words.add({
             word: w.word.toLowerCase(),
-            phonetic: w.phonetic || '',
+            articleId,
             definitions: w.definitions || [],
             examples: w.examples || [],
             source: w.definitions?.length ? 'ai' : '',
@@ -406,7 +431,7 @@ export const exportService = {
       exportDate: new Date().toISOString(),
       data: {
         articles: articles.map(({ id, ...rest }) => rest),
-        words: words.map(({ id, ...rest }) => rest),
+        words: words.map(({ id, phonetic, ...rest }) => rest),
         wordMarks: wordMarks.map(({ id, ...rest }) => rest),
         contextTranslations: contextTranslations.map(({ id, ...rest }) => rest)
       }
@@ -445,18 +470,23 @@ export const exportService = {
 
       const existingWords = await db.words.toArray()
       const wordMap = {}
-      existingWords.forEach(w => { wordMap[w.word] = w.id })
+      existingWords.forEach(w => { wordMap[`${w.word}_${w.articleId}`] = w.id })
 
       const wordIdMap = {}
       for (let i = 0; i < words.length; i++) {
         const w = words[i]
         const lower = w.word.toLowerCase()
-        if (wordMap[lower]) {
-          wordIdMap[i] = wordMap[lower]
+        const articleId = articleIdMap[w.articleId]
+        if (articleId == null) continue
+        const key = `${lower}_${articleId}`
+        if (wordMap[key]) {
+          wordIdMap[i] = wordMap[key]
         } else {
+          const { phonetic, articleId: oldArticleId, ...wRest } = w
           const id = await db.words.add({
-            ...w,
+            ...wRest,
             word: lower,
+            articleId,
             updatedAt: w.updatedAt || new Date()
           })
           wordIdMap[i] = id
@@ -486,17 +516,18 @@ export const exportService = {
       }
 
       const existingTranslations = await db.contextTranslations.toArray()
-      const translationSet = new Set(existingTranslations.map(t => `${t.wordId}_${t.articleId}`))
+      const translationSet = new Set(existingTranslations.map(t => `${t.wordId}_${t.articleId}_${t.occKey || '0'}`))
 
       for (const t of contextTranslations) {
         const wordId = wordIdMap[t.wordId]
         const articleId = articleIdMap[t.articleId]
         if (wordId && articleId) {
-          const key = `${wordId}_${articleId}`
+          const key = `${wordId}_${articleId}_${t.occKey || '0'}`
           if (!translationSet.has(key)) {
             await db.contextTranslations.add({
               wordId,
               articleId,
+              occKey: t.occKey || '0',
               translation: t.translation,
               createdAt: t.createdAt || new Date()
             })

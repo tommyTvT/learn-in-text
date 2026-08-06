@@ -9,7 +9,8 @@ const props = defineProps({
   loadingContext: Boolean,
   contextTranslation: String,
   contextError: Boolean,
-  articleId: Number
+  articleId: Number,
+  isMarked: Boolean
 })
 
 const emit = defineEmits(['close', 'auto-generate', 'retry-context'])
@@ -20,6 +21,17 @@ const popupStyle = ref({
   top: '-9999px',
   opacity: 0
 })
+
+const isMobile = ref(false)
+let mq = null
+let lastTouchCloseTime = 0
+
+const handleMqChange = (e) => {
+  isMobile.value = e.matches
+  if (!e.matches) {
+    nextTick(() => adjustPosition())
+  }
+}
 
 const definitions = computed(() => props.wordInfo?.definitions?.slice(0, 2) || [])
 
@@ -48,22 +60,50 @@ const contextTranslation = computed(() => {
 
 onMounted(() => {
   document.addEventListener('mousedown', handleClickOutside)
+  document.addEventListener('touchstart', handleClickOutside, { passive: true })
+  mq = window.matchMedia('(max-width: 639px)')
+  isMobile.value = mq.matches
+  if (mq.addEventListener) {
+    mq.addEventListener('change', handleMqChange)
+  } else {
+    mq.addListener(handleMqChange)
+  }
   nextTick(() => {
-    adjustPosition()
+    if (!isMobile.value) {
+      adjustPosition()
+    }
     popupStyle.value.opacity = 1
   })
 })
 
 onUnmounted(() => {
   document.removeEventListener('mousedown', handleClickOutside)
+  document.removeEventListener('touchstart', handleClickOutside)
+  if (mq) {
+    if (mq.removeEventListener) {
+      mq.removeEventListener('change', handleMqChange)
+    } else {
+      mq.removeListener(handleMqChange)
+    }
+  }
 })
 
 watch(() => [props.loading, props.wordInfo, props.loadingContext], () => {
-  nextTick(() => adjustPosition())
+  nextTick(() => {
+    if (!isMobile.value) {
+      adjustPosition()
+    }
+  })
 })
 
 function handleClickOutside(event) {
   if (popupRef.value && !popupRef.value.contains(event.target)) {
+    const now = Date.now()
+    if (event.type === 'touchstart') {
+      lastTouchCloseTime = now
+    } else if (now - lastTouchCloseTime < 500) {
+      return
+    }
     emit('close')
   }
 }
@@ -112,15 +152,38 @@ function adjustPosition() {
 <template>
   <div
     ref="popupRef"
-    class="fixed z-50 bg-white dark:bg-neutral-900 rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 w-64 max-h-[75vh] overflow-y-auto transition-opacity duration-150"
-    :style="popupStyle"
+    class="fixed z-50 bg-white dark:bg-neutral-900 transition-opacity duration-150"
+    :class="isMobile
+      ? 'bottom-0 inset-x-0 rounded-t-2xl border-t border-gray-200 dark:border-neutral-800 max-h-[80vh] overflow-y-auto shadow-[0_-8px_30px_rgba(0,0,0,0.15)]'
+      : 'rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 w-64 max-h-[75vh] overflow-y-auto'"
+    :style="isMobile ? {} : popupStyle"
   >
+    <div class="flex justify-center pt-2 sm:hidden">
+      <div class="w-10 h-1 rounded-full bg-gray-300 dark:bg-neutral-700"></div>
+    </div>
     <div class="p-3">
-      <div class="flex items-baseline gap-2 mb-2">
-        <span class="text-lg font-bold text-gray-900 dark:text-neutral-100">{{ word }}</span>
-        <span v-if="wordInfo?.phonetic" class="text-sm text-gray-500 dark:text-neutral-400">
-          {{ wordInfo.phonetic }}
+      <div class="flex items-start gap-2 mb-2">
+        <div class="flex items-baseline gap-2 flex-1 min-w-0">
+          <span class="text-lg font-bold text-gray-900 dark:text-neutral-100">{{ word }}</span>
+          <span v-if="wordInfo?.phonetic" class="text-sm text-gray-500 dark:text-neutral-400">
+            {{ wordInfo.phonetic }}
+          </span>
+        </div>
+        <span
+          v-if="isMarked"
+          class="flex-shrink-0 px-2 py-0.5 text-xs font-medium bg-yellow-100 dark:bg-yellow-500/20 text-yellow-800 dark:text-yellow-300 rounded-full"
+        >
+          已标记
         </span>
+        <button
+          @click="$emit('close')"
+          class="flex-shrink-0 p-1 -m-1 text-gray-400 hover:text-gray-600 dark:hover:text-neutral-200"
+          aria-label="关闭"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       <div v-if="loading" class="py-3 text-center">

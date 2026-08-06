@@ -33,7 +33,8 @@ export const useWordStore = defineStore('word', () => {
       const wordMap = {}
       allWords.forEach(w => { wordMap[w.id] = w })
       const wordIds = [...new Set(allMarks.map(m => m.wordId))]
-      markedWords.value = wordIds.map(id => wordMap[id]).filter(Boolean)
+      const markedRecords = wordIds.map(id => wordMap[id]).filter(Boolean)
+      markedWords.value = dedupeByWord(markedRecords)
       await fetchWordArticles()
       await fetchArticleWords()
     } finally {
@@ -41,16 +42,34 @@ export const useWordStore = defineStore('word', () => {
     }
   }
 
+  function dedupeByWord(records) {
+    const map = new Map()
+    for (const record of records) {
+      const existing = map.get(record.word)
+      if (!existing || new Date(record.updatedAt) > new Date(existing.updatedAt)) {
+        map.set(record.word, record)
+      }
+    }
+    return [...map.values()]
+  }
+
   async function fetchWordArticles() {
     const allArticles = await articleService.getAll()
     const articleMap = {}
     allArticles.forEach(a => { articleMap[a.id] = a })
 
-    const markMap = await wordMarkService.getAllArticleWordMap()
+    const allWords = await wordService.getAll()
+    const allMarks = await wordMarkService.getAll()
     const result = {}
     for (const word of markedWords.value) {
-      const articleIds = markMap[word.id] || []
-      result[word.id] = [...new Set(articleIds)].map(aid => articleMap[aid]).filter(Boolean)
+      const records = allWords.filter(w => w.word === word.word)
+      const articleIds = new Set()
+      for (const record of records) {
+        for (const mark of allMarks) {
+          if (mark.wordId === record.id) articleIds.add(mark.articleId)
+        }
+      }
+      result[word.id] = [...articleIds].map(aid => articleMap[aid]).filter(Boolean)
     }
     wordArticlesMap.value = result
   }
@@ -64,7 +83,7 @@ export const useWordStore = defineStore('word', () => {
 
     const result = {}
     for (const article of allArticles) {
-      const wordIds = wordArticleMap[article.id] || []
+      const wordIds = [...new Set(wordArticleMap[article.id] || [])]
       const articleWords = wordIds.map(id => wordMap[id]).filter(Boolean)
       if (articleWords.length > 0) {
         result[article.id] = articleWords
@@ -81,8 +100,8 @@ export const useWordStore = defineStore('word', () => {
     return articleWordsMap.value[articleId] || []
   }
 
-  async function getOrCreateWord(word) {
-    return await wordService.getOrCreate(word)
+  async function getOrCreateWord(word, articleId) {
+    return await wordService.getOrCreate(word, articleId)
   }
 
   async function updateWord(id, data) {
@@ -94,8 +113,8 @@ export const useWordStore = defineStore('word', () => {
     return word
   }
 
-  async function updateContextTranslation(wordId, articleId, translation) {
-    return await contextTranslationService.set(wordId, articleId, translation)
+  async function updateContextTranslation(wordId, articleId, occKey, translation) {
+    return await contextTranslationService.set(wordId, articleId, occKey, translation)
   }
 
   async function toggleMark(wordId, articleId, occKey = '0') {
@@ -117,9 +136,13 @@ export const useWordStore = defineStore('word', () => {
   }
 
   async function deleteWord(id) {
-    await wordService.delete(id)
-    markedWords.value = markedWords.value.filter(w => w.id !== id)
+    const record = await wordService.getById(id)
+    if (!record) return
+    await wordService.deleteBySpelling(record.word)
+    markedWords.value = markedWords.value.filter(w => w.word !== record.word)
     delete wordArticlesMap.value[id]
+    await fetchWordArticles()
+    await fetchArticleWords()
   }
 
   async function exportWords() {

@@ -1,6 +1,6 @@
 ﻿<script setup>
 import { ref, onMounted, computed } from 'vue'
-import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useArticleStore } from '../stores/article'
 import { useWordStore } from '../stores/word'
 import { parseArticle, getWordContext } from '../services/parser'
@@ -16,44 +16,49 @@ const wordStore = useWordStore()
 const article = ref(null)
 const parsedContent = ref(null)
 const selectedWord = ref(null)
+const selectedOccKey = ref(null)
 const wordPosition = ref({ x: 0, y: 0 })
 const wordInfo = ref(null)
 const loadingWord = ref(false)
 const loadingContext = ref(false)
 const articleWords = ref([])
-const saving = ref(false)
 
 const localMarks = ref(new Set())
-const dbMarks = ref(new Set())
-const activeRedKey = ref(null)
+const activeOccKey = ref(null)
 const contextTranslation = ref(null)
 const contextError = ref(false)
+
+const isViewMode = computed(() => route.query.mode === 'view')
+const stickyHighlights = ref(new Map())
+
+const editingTitle = ref(false)
+const titleInput = ref('')
+
+function startEditTitle() {
+  if (!article.value) return
+  titleInput.value = article.value.title
+  editingTitle.value = true
+}
+
+async function saveTitle() {
+  const title = titleInput.value.trim()
+  if (!title) {
+    alert('标题不能为空')
+    return
+  }
+  await articleStore.updateArticle(article.value.id, { title })
+  article.value = await articleStore.fetchArticle(article.value.id)
+  editingTitle.value = false
+}
+
+function cancelEditTitle() {
+  editingTitle.value = false
+  titleInput.value = ''
+}
 
 const batchProgress = ref({ completed: 0, total: 0, running: false, error: null })
 
 const articleId = computed(() => parseInt(route.params.id))
-const fromVocab = computed(() => route.query.fromVocab === '1')
-const isManagement = computed(() => fromVocab.value)
-
-const isDirty = computed(() => {
-  if (localMarks.value.size !== dbMarks.value.size) return true
-  for (const id of localMarks.value) {
-    if (!dbMarks.value.has(id)) return true
-  }
-  return false
-})
-
-onBeforeRouteLeave((to, from, next) => {
-  if (isDirty.value) {
-    if (confirm('有未保存的标记变更，确定离开吗？')) {
-      next()
-    } else {
-      next(false)
-    }
-  } else {
-    next()
-  }
-})
 
 onMounted(async () => {
   article.value = await articleStore.fetchArticle(articleId.value)
@@ -64,49 +69,18 @@ onMounted(async () => {
   }
   parsedContent.value = parseArticle(article.value.content)
   await loadArticleWords()
-  if (isManagement.value) {
-    const marks = await wordMarkService.getByArticle(articleId.value)
-    const markedKeys = new Set(marks.map(m => m.occKey))
-    localMarks.value = markedKeys
-    dbMarks.value = new Set(markedKeys)
-  }
+  const marks = await wordMarkService.getByArticle(articleId.value)
+  localMarks.value = new Set(marks.map(m => m.occKey))
   await autoGenerateAllWords()
 })
 
 async function loadArticleWords() {
   const words = []
   for (const word of parsedContent.value.words) {
-    const wordData = await wordStore.getOrCreateWord(word)
+    const wordData = await wordStore.getOrCreateWord(word, articleId.value)
     words.push(wordData)
   }
   articleWords.value = words
-}
-
-async function saveMarks() {
-  saving.value = true
-  try {
-    const occKeyWordMap = buildOccKeyWordMap()
-
-    const toAdd = [...localMarks.value].filter(key => !dbMarks.value.has(key))
-    const toRemove = [...dbMarks.value].filter(key => !localMarks.value.has(key))
-
-    for (const occKey of toAdd) {
-      const wordId = occKeyWordMap.get(occKey)
-      if (wordId) {
-        await wordMarkService.add(wordId, articleId.value, occKey)
-      }
-    }
-    for (const occKey of toRemove) {
-      await wordMarkService.remove(articleId.value, occKey)
-    }
-
-    dbMarks.value = new Set(localMarks.value)
-    await loadArticleWords()
-  } catch (error) {
-    alert('保存失败: ' + error.message)
-  } finally {
-    saving.value = false
-  }
 }
 
 function buildOccKeyWordMap() {
@@ -138,19 +112,62 @@ function getMarkedWordIdsInArticle() {
 
 async function handleWordClick(event, part) {
   event.preventDefault()
-  const wordData = await wordStore.getOrCreateWord(part.word)
-  const markedHereBefore = getMarkedWordIdsInArticle().has(wordData.id)
-  const otherArticleIds = await wordMarkService.getMarkedArticleIds(wordData.id)
-  const markedElsewhere = otherArticleIds.some(a => a !== articleId.value)
 
-  if (!localMarks.value.has(part.occKey)) {
+  if (!isViewMode.value) {
+    const sticky = stickyHighlights.value.get(part.occKey)
+    if (sticky === 'red') {
+      stickyHighlights.value.delete(part.occKey)
+      closePopup()
+      return
+    }
+    if (sticky === 'yellow') {
+      await wordMarkService.remove(articleId.value, part.occKey)
+      const newLocalMarks = new Set(localMarks.value)
+      newLocalMarks.delete(part.occKey)
+      localMarks.value = newLocalMarks
+      stickyHighlights.value.delete(part.occKey)
+      closePopup()
+      return
+    }
+    const color = await judgeWordColor(part)
+    const wordData = await wordStore.getOrCreateWord(part.word, articleId.value)
+    await wordMarkService.add(wordData.id, articleId.value, part.occKey)
     const newLocalMarks = new Set(localMarks.value)
     newLocalMarks.add(part.occKey)
     localMarks.value = newLocalMarks
+    stickyHighlights.value.set(part.occKey, color)
+    openPopup(event, part)
+    return
   }
 
-  activeRedKey.value = (markedHereBefore || markedElsewhere) ? part.occKey : null
+  if (localMarks.value.has(part.occKey)) {
+    await toggleMark(part)
+    closePopup()
+    return
+  }
 
+  const wordData = await wordStore.getOrCreateWord(part.word, articleId.value)
+
+  const newLocalMarks = new Set(localMarks.value)
+  newLocalMarks.add(part.occKey)
+  localMarks.value = newLocalMarks
+  await wordMarkService.add(wordData.id, articleId.value, part.occKey)
+
+  activeOccKey.value = part.occKey
+
+  openPopup(event, part)
+}
+
+async function judgeWordColor(part) {
+  if (localMarks.value.has(part.occKey)) return 'red'
+  const wordData = await wordStore.getOrCreateWord(part.word, articleId.value)
+  const markedHereBefore = getMarkedWordIdsInArticle().has(wordData.id)
+  const otherArticleIds = await wordMarkService.getMarkedArticleIdsByWord(part.word, articleId.value)
+  const markedElsewhere = otherArticleIds.length > 0
+  return (markedHereBefore || markedElsewhere) ? 'red' : 'yellow'
+}
+
+function openPopup(event, part) {
   const rect = event.target.getBoundingClientRect()
   wordPosition.value = {
     wordRect: {
@@ -163,25 +180,26 @@ async function handleWordClick(event, part) {
     }
   }
   selectedWord.value = part.word
-  loadWordDetails(part.word)
-}
-
-async function handleWordRightClick(event, part) {
-  event.preventDefault()
-  await toggleMark(part)
+  selectedOccKey.value = part.occKey
+  loadWordDetails(part.word, part.occKey)
 }
 
 let wordDetailRequestId = 0
 
-async function loadWordDetails(word) {
+function getOccurrence(occKey) {
+  const index = occKey.lastIndexOf(':')
+  return index >= 0 ? parseInt(occKey.slice(index + 1)) || 0 : 0
+}
+
+async function loadWordDetails(word, occKey) {
   const requestId = ++wordDetailRequestId
   loadingContext.value = false
   contextTranslation.value = null
   contextError.value = false
   wordInfo.value = null
   try {
-    const wordData = await wordStore.getOrCreateWord(word)
-    const cached = await contextTranslationService.get(wordData.id, articleId.value).catch(() => null)
+    const wordData = await wordStore.getOrCreateWord(word, articleId.value)
+    const cached = await contextTranslationService.get(wordData.id, articleId.value, occKey).catch(() => null)
     if (requestId !== wordDetailRequestId) return
     wordInfo.value = wordData
     const cachedTranslation = cached?.translation || null
@@ -190,7 +208,7 @@ async function loadWordDetails(word) {
       await generateBasicInfo(word)
     }
     if (!cachedTranslation) {
-      loadContextTranslation(word, requestId)
+      loadContextTranslation(word, occKey, requestId)
     }
   } finally {
     if (requestId === wordDetailRequestId) {
@@ -201,28 +219,36 @@ async function loadWordDetails(word) {
 
 async function toggleMark(part) {
   const newLocalMarks = new Set(localMarks.value)
+  const wordData = await wordStore.getOrCreateWord(part.word, articleId.value)
+  let isNowMarked = false
   if (newLocalMarks.has(part.occKey)) {
     newLocalMarks.delete(part.occKey)
   } else {
     newLocalMarks.add(part.occKey)
+    isNowMarked = true
   }
   localMarks.value = newLocalMarks
-  if (activeRedKey.value === part.occKey) {
-    activeRedKey.value = null
+  if (isNowMarked) {
+    await wordMarkService.add(wordData.id, articleId.value, part.occKey)
+  } else {
+    await wordMarkService.remove(articleId.value, part.occKey)
+  }
+  if (activeOccKey.value === part.occKey) {
+    activeOccKey.value = null
   }
 }
 
 async function generateBasicInfo(word) {
   loadingWord.value = true
   try {
-    const info = await generateWordBasicInfo(word)
-    const wordData = await wordStore.getOrCreateWord(word)
+    const context = getWordContext(article.value.content, word, 50)
+    const info = await generateWordBasicInfo(word, context)
+    const wordData = await wordStore.getOrCreateWord(word, articleId.value)
     await wordStore.updateWord(wordData.id, {
-      phonetic: info.phonetic || wordData.phonetic,
       definitions: info.definitions || wordData.definitions,
       source: 'ai'
     })
-    wordInfo.value = await wordStore.getOrCreateWord(word)
+    wordInfo.value = await wordStore.getOrCreateWord(word, articleId.value)
   } catch (error) {
     alert('AI生成失败: ' + error.message)
   } finally {
@@ -230,28 +256,28 @@ async function generateBasicInfo(word) {
   }
 }
 
-async function loadContextTranslation(word, requestId) {
-  const wordData = await wordStore.getOrCreateWord(word)
-  const existing = await contextTranslationService.get(wordData.id, articleId.value).catch(() => null)
+async function loadContextTranslation(word, occKey, requestId) {
+  const wordData = await wordStore.getOrCreateWord(word, articleId.value)
+  const existing = await contextTranslationService.get(wordData.id, articleId.value, occKey).catch(() => null)
   if (requestId !== wordDetailRequestId) return
   if (existing?.translation) {
     contextTranslation.value = existing.translation
     return
   }
   if (existing) {
-    await contextTranslationService.set(wordData.id, articleId.value, '')
+    await contextTranslationService.set(wordData.id, articleId.value, occKey, '')
   }
 
   contextError.value = false
   loadingContext.value = true
   try {
-    const context = getWordContext(article.value.content, word)
+    const context = getWordContext(article.value.content, word, 0, getOccurrence(occKey))
     const result = await generateWordContextTranslation(word, context)
     if (requestId !== wordDetailRequestId) return
     if (!result.contextTranslation) {
       throw new Error('翻译结果为空')
     }
-    await wordStore.updateContextTranslation(wordData.id, articleId.value, result.contextTranslation)
+    await wordStore.updateContextTranslation(wordData.id, articleId.value, occKey, result.contextTranslation)
     contextTranslation.value = result.contextTranslation
   } catch (error) {
     console.error('上下文翻译生成失败:', error.message)
@@ -267,15 +293,16 @@ async function loadContextTranslation(word, requestId) {
 
 function retryContextTranslation() {
   if (!selectedWord.value) return
-  loadContextTranslation(selectedWord.value, wordDetailRequestId)
+  loadContextTranslation(selectedWord.value, selectedOccKey.value, wordDetailRequestId)
 }
 
 function closePopup() {
   selectedWord.value = null
+  selectedOccKey.value = null
   wordInfo.value = null
   contextTranslation.value = null
   contextError.value = false
-  activeRedKey.value = null
+  activeOccKey.value = null
 }
 
 async function autoGenerateAllWords() {
@@ -284,7 +311,10 @@ async function autoGenerateAllWords() {
     return
   }
 
-  const words = wordsToGenerate.map(w => w.word)
+  const words = wordsToGenerate.map(w => ({
+    word: w.word,
+    context: getWordContext(article.value.content, w.word, 50)
+  }))
 
   batchProgress.value = { completed: 0, total: words.length, running: true, error: null }
 
@@ -299,9 +329,8 @@ async function autoGenerateAllWords() {
 
     for (const result of results) {
       if (result.success) {
-        const wordData = await wordStore.getOrCreateWord(result.word)
+        const wordData = await wordStore.getOrCreateWord(result.word, articleId.value)
         await wordStore.updateWord(wordData.id, {
-          phonetic: result.info.phonetic || wordData.phonetic,
           definitions: result.info.definitions || wordData.definitions,
           source: 'ai'
         })
@@ -317,20 +346,34 @@ async function autoGenerateAllWords() {
 }
 
 function getWordHighlight(part) {
-  if (part.occKey === activeRedKey.value) {
+  if (isViewMode.value) {
+    if (localMarks.value.has(part.occKey)) {
+      return 'bg-yellow-300 dark:bg-yellow-500/80 text-yellow-900 dark:text-yellow-950'
+    }
+    return ''
+  }
+  const sticky = stickyHighlights.value.get(part.occKey)
+  if (sticky === 'red') {
     return 'bg-red-300 dark:bg-red-500/80 text-red-900 dark:text-red-950'
   }
-  if (localMarks.value.has(part.occKey)) {
+  if (sticky === 'yellow') {
     return 'bg-yellow-300 dark:bg-yellow-500/80 text-yellow-900 dark:text-yellow-950'
   }
   return ''
 }
 
 function getWordHighlightHover(part) {
-  if (part.occKey === activeRedKey.value) {
+  if (isViewMode.value) {
+    return 'hover:bg-yellow-200 dark:hover:bg-yellow-500/40'
+  }
+  const sticky = stickyHighlights.value.get(part.occKey)
+  if (sticky === 'red') {
     return 'hover:bg-red-200 dark:hover:bg-red-500/40'
   }
-  return 'hover:bg-yellow-200 dark:hover:bg-yellow-500/40'
+  if (sticky === 'yellow') {
+    return 'hover:bg-yellow-200 dark:hover:bg-yellow-500/40'
+  }
+  return 'hover:bg-gray-100 dark:hover:bg-neutral-800'
 }
 
 function renderContent() {
@@ -394,21 +437,54 @@ function renderContent() {
       </button>
     </div>
 
-    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-8">
-      <div class="flex items-center gap-3 mb-6">
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-neutral-100">{{ article.title }}</h1>
-        <span v-if="isManagement" class="px-2 py-0.5 text-xs bg-blue-100 dark:bg-neutral-800 text-blue-700 dark:text-neutral-300 rounded-full">📖 管理模式</span>
-        <span v-else class="px-2 py-0.5 text-xs bg-green-100 dark:bg-neutral-800 text-green-700 dark:text-neutral-300 rounded-full">📖 学习模式</span>
-        <button
-          v-if="isDirty"
-          @click="saveMarks"
-          :disabled="saving"
-          class="ml-auto px-4 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
-        >
-          {{ saving ? '保存中...' : '💾 保存标记' }}
-        </button>
-        <span v-else-if="localMarks.size > 0" class="ml-auto text-xs text-gray-400 dark:text-neutral-500">已保存</span>
+    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 sm:p-8">
+      <div class="flex flex-wrap items-center gap-3 mb-6">
+        <template v-if="editingTitle">
+          <input
+            v-model="titleInput"
+            type="text"
+            @keyup.enter="saveTitle"
+            @keyup.esc="cancelEditTitle"
+            class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-neutral-100 bg-white dark:bg-neutral-800 border border-blue-400 dark:border-blue-500 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full max-w-md"
+            autofocus
+          />
+          <button
+            @click="saveTitle"
+            class="text-green-600 hover:text-green-700"
+            title="保存标题"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+            </svg>
+          </button>
+          <button
+            @click="cancelEditTitle"
+            class="text-gray-400 hover:text-gray-600 dark:hover:text-neutral-300"
+            title="取消"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </template>
+        <template v-else>
+          <h1 class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-neutral-100">{{ article.title }}</h1>
+          <button
+            @click="startEditTitle"
+            class="text-gray-400 hover:text-blue-500"
+            title="编辑标题"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+          </button>
+        </template>
+        <span v-if="!isViewMode" class="px-2 py-0.5 text-xs bg-green-100 dark:bg-neutral-800 text-green-700 dark:text-neutral-300 rounded-full">📖 学习模式</span>
+        <span v-else class="px-2 py-0.5 text-xs bg-purple-100 dark:bg-neutral-800 text-purple-700 dark:text-neutral-300 rounded-full">📚 管理模式</span>
+        <span v-if="isViewMode && localMarks.size > 0" class="ml-auto text-xs text-gray-400 dark:text-neutral-500">已标记 {{ localMarks.size }} 处</span>
       </div>
+
+      <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-4 mb-6">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。</p>
 
       <div v-if="batchProgress.running" class="mb-4">
         <div class="flex justify-between text-sm text-gray-600 dark:text-neutral-400 mb-1">
@@ -432,7 +508,6 @@ function renderContent() {
               <span
                 v-else
                 @click="handleWordClick($event, part)"
-                @contextmenu="handleWordRightClick($event, part)"
                 :class="[
                   'cursor-pointer transition-colors rounded px-0.5',
                   getWordHighlightHover(part),
@@ -447,7 +522,7 @@ function renderContent() {
 
     <WordPopup
       v-if="selectedWord"
-      :key="selectedWord"
+      :key="`${selectedWord}:${selectedOccKey}`"
       :word="selectedWord"
       :word-info="wordInfo"
       :position="wordPosition"
@@ -456,6 +531,7 @@ function renderContent() {
       :context-translation="contextTranslation"
       :context-error="contextError"
       :article-id="articleId"
+      :is-marked="activeOccKey ? localMarks.has(activeOccKey) : false"
       @close="closePopup"
       @auto-generate="generateBasicInfo"
       @retry-context="retryContextTranslation"
