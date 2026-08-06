@@ -131,8 +131,8 @@ const ARTICLE_STYLE_MAP = {
 }
 
 const ESSAY_TYPE_MAP = {
-  small: '高中小作文（约80词，简洁正式的应用文）',
-  long: '高中大作文（读后续写风格，约150词，以叙事为主，情节完整且有推进）'
+  small: '高中小作文（简洁正式的应用文）',
+  long: '高中大作文（读后续写风格，以叙事为主，情节完整且有推进）'
 }
 
 const FORMAT_MAP = {

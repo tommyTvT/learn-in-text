@@ -145,59 +145,6 @@ export const wordService = {
         await db.words.delete(record.id)
       }
     })
-  },
-
-  async importWords(words) {
-    let importArticle = await db.articles.where('title').equals('导入词汇').first()
-    if (!importArticle) {
-      const now = new Date()
-      const id = await db.articles.add({
-        title: '导入词汇',
-        content: '此文章由导入词汇自动生成',
-        createdAt: now,
-        updatedAt: now
-      })
-      importArticle = await db.articles.get(id)
-    }
-
-    return await db.transaction('rw', db.words, db.wordMarks, async () => {
-      for (const word of words) {
-        const existing = await this.getByWord(word.word, importArticle.id)
-        let wordRecord
-        if (existing) {
-          await db.words.update(existing.id, {
-            definitions: word.definitions || existing.definitions,
-            examples: word.examples || existing.examples,
-            source: word.definitions?.length ? 'ai' : existing.source,
-            updatedAt: new Date()
-          })
-          wordRecord = await db.words.get(existing.id)
-        } else {
-          const id = await db.words.add({
-            word: word.word.toLowerCase(),
-            articleId: importArticle.id,
-            definitions: word.definitions || [],
-            examples: word.examples || [],
-            source: word.definitions?.length ? 'ai' : '',
-            updatedAt: new Date()
-          })
-          wordRecord = await db.words.get(id)
-        }
-
-        const existingMark = await db.wordMarks.where({
-          wordId: wordRecord.id,
-          articleId: importArticle.id
-        }).first()
-        if (!existingMark) {
-          await db.wordMarks.add({
-            wordId: wordRecord.id,
-            articleId: importArticle.id,
-            occKey: '0',
-            createdAt: new Date()
-          })
-        }
-      }
-    })
   }
 }
 
@@ -312,28 +259,6 @@ export const contextTranslationService = {
 }
 
 export const exportService = {
-  async exportAll() {
-    const marks = await db.wordMarks.toArray()
-    const wordIds = [...new Set(marks.map(m => m.wordId))]
-    const words = await wordService.getByIds(wordIds)
-    return {
-      version: 2,
-      exportDate: new Date().toISOString(),
-      words: words.map(({ word, definitions, examples }) => ({
-        word,
-        definitions,
-        examples
-      }))
-    }
-  },
-
-  async importAll(data) {
-    if (data.version !== 2) {
-      throw new Error('不支持的导入格式版本')
-    }
-    await wordService.importWords(data.words)
-  },
-
   async exportArticle(articleId) {
     const article = await db.articles.get(articleId)
     if (!article) throw new Error('文章不存在')

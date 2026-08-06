@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useSettingsStore, AI_PROVIDERS } from '../stores/settings'
 import { testConnection } from '../services/ai'
 import { exportService } from '../services/db'
@@ -7,6 +7,17 @@ import { exportService } from '../services/db'
 const settingsStore = useSettingsStore()
 
 const showApiKey = ref(false)
+const apiKeyFocused = ref(false)
+const apiKeyInput = ref('')
+const apiKeyShown = computed(() =>
+  apiKeyFocused.value || showApiKey.value || !apiKeyInput.value
+    ? apiKeyInput.value
+    : '••••••••'
+)
+function onApiKeyInput(e) {
+  apiKeyInput.value = e.target.value
+  settingsStore.aiApiKey = e.target.value
+}
 const testing = ref(false)
 const testResult = ref(null)
 const exporting = ref(false)
@@ -121,6 +132,7 @@ async function resetDatabase() {
 }
 
 onMounted(() => {
+  apiKeyInput.value = settingsStore.aiApiKey
   loadStats()
 })
 </script>
@@ -132,8 +144,8 @@ onMounted(() => {
       <p class="text-gray-600 dark:text-neutral-400">配置AI接口和其他设置</p>
     </div>
 
-    <div class="max-w-2xl">
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6 mb-6">
+    <div class="space-y-6">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">外观</h2>
         <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
           选择界面主题，默认跟随系统偏好
@@ -155,7 +167,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6 mb-6">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">AI 接口配置</h2>
         <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
           配置OpenAI兼容的API接口，用于生成单词信息和文章
@@ -199,12 +211,16 @@ onMounted(() => {
 
           <div>
             <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">API Key</label>
+            <!-- 不使用密码输入框：部分手机的安全输入法无法粘贴，改用 text 输入框 + 隐藏时用点号遮挡 -->
             <div class="relative">
               <input
-                v-model="settingsStore.aiApiKey"
-                :type="showApiKey ? 'text' : 'password'"
+                :value="apiKeyShown"
+                @input="onApiKeyInput"
+                @focus="apiKeyFocused = true"
+                @blur="apiKeyFocused = false"
+                type="text"
                 placeholder="sk-..."
-                class="w-full px-3 py-2 pr-20 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+                class="w-full px-3 py-2 pr-12 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
               />
               <button
                 @click="showApiKey = !showApiKey"
@@ -279,7 +295,7 @@ onMounted(() => {
         </p>
       </div>
 
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6 mt-6">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
         <button
           @click="showDevOptions = !showDevOptions"
           class="flex items-center justify-between w-full"

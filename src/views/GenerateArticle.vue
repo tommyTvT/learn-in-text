@@ -65,7 +65,7 @@ function onEssayTypeChange() {
   if (mode.value === 'essay') applyEssayTypeDefaults()
 }
 
-const essayTypeLabel = computed(() => ({ small: '高中小作文（约80词，简洁应用文）', long: '高中大作文（读后续写风格，约150词）' }[essayType.value]))
+const essayTypeLabel = computed(() => ({ small: '高中小作文（简洁应用文）', long: '高中大作文（读后续写风格）' }[essayType.value]))
 const formatLabel = computed(() => ({
   general: '普通作文',
   recommendation: '推荐信',
@@ -260,8 +260,8 @@ async function saveArticle() {
                 @change="onEssayTypeChange"
                 class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
               >
-                <option value="small">高中小作文（约80词）</option>
-                <option value="long">高中大作文（读后续写，约150词）</option>
+                <option value="small">高中小作文</option>
+                <option value="long">高中大作文（读后续写）</option>
               </select>
             </div>
             <div v-if="essayType === 'small'">

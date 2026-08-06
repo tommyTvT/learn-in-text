@@ -8,7 +8,6 @@ const router = useRouter()
 const wordStore = useWordStore()
 const articleStore = useArticleStore()
 
-const searchQuery = ref('')
 const sortBy = ref('updatedAt')
 const selectedWords = ref([])
 const expandedArticles = ref(new Set())
@@ -45,18 +44,7 @@ const articlesWithWords = computed(() => {
 })
 
 function getArticleWords(articleId) {
-  let words = wordStore.articleWordsMap[articleId] || []
-
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase()
-    words = words.filter(w => w.word.includes(query))
-  }
-
-  return words
-}
-
-function getWordArticles(wordId) {
-  return wordStore.wordArticlesMap[wordId] || []
+  return wordStore.articleWordsMap[articleId] || []
 }
 
 function isArticleExpanded(articleId) {
@@ -129,34 +117,6 @@ function exportSelectedTxt() {
   wordStore.exportSelectedWordsTxt(selectedWords.value)
 }
 
-async function exportWords() {
-  const data = await wordStore.exportWords()
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `vocabulary_${new Date().toISOString().split('T')[0]}.json`
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-function importWords(event) {
-  const file = event.target.files[0]
-  if (!file) return
-
-  const reader = new FileReader()
-  reader.onload = async (e) => {
-    try {
-      const data = JSON.parse(e.target.result)
-      await wordStore.importWords(data)
-      alert('导入成功')
-    } catch (error) {
-      alert('导入失败: ' + error.message)
-    }
-  }
-  reader.readAsText(file)
-}
-
 function goToGenerate() {
   if (selectedWords.value.length === 0) return
   const spellings = selectedWords.value.map(id => {
@@ -187,28 +147,7 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
     </div>
 
     <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6 mb-6">
-      <div class="flex flex-col sm:flex-row gap-4 mb-4">
-        <div class="flex-1">
-          <input
-            v-model="searchQuery"
-            type="text"
-            placeholder="搜索单词..."
-            class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-          />
-        </div>
-        <div class="flex gap-2">
-          <select
-            v-model="sortBy"
-            class="px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="updatedAt">最近更新</option>
-            <option value="wordCount">单词数量</option>
-            <option value="title">文章标题</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="flex flex-wrap gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <button
           @click="expandAll"
           class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
@@ -249,16 +188,14 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
           导出选中TXT
         </button>
         <div class="flex-1"></div>
-        <button
-          @click="exportWords"
-          class="px-3 py-1.5 text-sm bg-blue-100 dark:bg-neutral-800 text-blue-700 dark:text-neutral-300 rounded-md hover:bg-blue-200 dark:hover:bg-neutral-700"
+        <select
+          v-model="sortBy"
+          class="px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
-          导出
-        </button>
-        <label class="px-3 py-1.5 text-sm bg-green-100 dark:bg-neutral-800 text-green-700 dark:text-neutral-300 rounded-md hover:bg-green-200 dark:hover:bg-neutral-700 cursor-pointer">
-          导入
-          <input type="file" accept=".json" @change="importWords" class="hidden" />
-        </label>
+          <option value="updatedAt">最近更新</option>
+          <option value="wordCount">单词数量</option>
+          <option value="title">文章标题</option>
+        </select>
       </div>
     </div>
 
@@ -314,10 +251,7 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
         </div>
 
         <div v-if="isArticleExpanded(article.id)" class="px-4 sm:px-6 pb-4 border-t border-gray-100 dark:border-neutral-800">
-          <div v-if="getArticleWords(article.id).length === 0" class="py-4 text-sm text-gray-400 dark:text-neutral-500 text-center">
-            该文章中没有匹配的单词
-          </div>
-          <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
             <div
               v-for="word in getArticleWords(article.id)"
               :key="word.id"
@@ -355,22 +289,6 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
               <p v-if="word.definitions?.length" class="text-xs text-gray-600 dark:text-neutral-400 mt-1.5 line-clamp-2">
                 {{ word.definitions[0].meaning }}
               </p>
-              <div v-if="getWordArticles(word.id).length > 1" class="mt-2 flex flex-wrap gap-1">
-                <span
-                  v-for="a in getWordArticles(word.id)"
-                  :key="a.id"
-                  :class="[
-                    'inline-flex items-center px-1.5 py-0.5 text-xs rounded cursor-pointer',
-                    a.id === article.id
-                      ? 'bg-gray-100 dark:bg-neutral-700 text-gray-500 dark:text-neutral-400'
-                      : 'bg-blue-50 dark:bg-neutral-800 text-blue-600 dark:text-neutral-300 hover:bg-blue-100 dark:hover:bg-neutral-700'
-                  ]"
-                  @click.stop="goToArticle(a.id)"
-                  :title="a.title"
-                >
-                  {{ a.id === article.id ? '当前' : (a.title.length > 8 ? a.title.slice(0, 8) + '...' : a.title) }}
-                </span>
-              </div>
             </div>
           </div>
         </div>
