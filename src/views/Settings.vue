@@ -533,9 +533,6 @@ onMounted(() => {
             <div class="flex items-start justify-between gap-4">
               <div>
                 <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">自动同步</h3>
-                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                  打开应用、切回前台时自动同步，并每 5 分钟在后台静默同步。全程无需手动操作，失败会在下次自动重试。
-                </p>
               </div>
               <button
                 type="button"
@@ -554,12 +551,6 @@ onMounted(() => {
                   ]"
                 />
               </button>
-            </div>
-
-            <div v-if="settingsStore.autoSync" class="mt-4">
-              <p class="text-xs text-gray-500 dark:text-neutral-400">
-                同步间隔固定为 5 分钟，在浏览器打开期间按此间隔自动同步；页面关闭后不工作，下次打开时会立即补同步。
-              </p>
             </div>
 
             <div
