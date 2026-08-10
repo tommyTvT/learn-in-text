@@ -137,7 +137,6 @@ async function handleTestCloudConnection() {
 }
 
 async function handleSync() {
-  if (!confirm('将执行双向差异同步：云端与本地按更新时间合并，删除操作会双向传播。确定继续？')) return
   cloudSyncing.value = true
   cloudResult.value = null
   try {
@@ -535,7 +534,7 @@ onMounted(() => {
               <div>
                 <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">自动同步</h3>
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                  打开应用、切回前台时自动同步，并按设定间隔在后台静默同步。全程无需手动操作，失败会在下次自动重试。
+                  打开应用、切回前台时自动同步，并每 5 分钟在后台静默同步。全程无需手动操作，失败会在下次自动重试。
                 </p>
               </div>
               <button
@@ -558,19 +557,8 @@ onMounted(() => {
             </div>
 
             <div v-if="settingsStore.autoSync" class="mt-4">
-              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">同步间隔</label>
-              <select
-                v-model.number="settingsStore.autoSyncIntervalMin"
-                class="w-full sm:w-64 px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option :value="5">每 5 分钟</option>
-                <option :value="15">每 15 分钟</option>
-                <option :value="30">每 30 分钟</option>
-                <option :value="60">每小时</option>
-                <option :value="120">每 2 小时</option>
-              </select>
-              <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                在浏览器打开期间按此间隔自动同步；页面关闭后不工作，下次打开时会立即补同步。
+              <p class="text-xs text-gray-500 dark:text-neutral-400">
+                同步间隔固定为 5 分钟，在浏览器打开期间按此间隔自动同步；页面关闭后不工作，下次打开时会立即补同步。
               </p>
             </div>
 

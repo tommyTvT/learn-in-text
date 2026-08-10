@@ -8,6 +8,8 @@ const LOCK_KEY = 'learn_in_text_sync_lock'
 const RETRY_BACKOFF_MS = 60_000
 // 跨标签页锁有效期（毫秒）：防止多个标签页同时全量同步
 const LOCK_TTL_MS = 90_000
+// 自动同步固定间隔（分钟）：同步间隔固定为 5 分钟，不再由用户配置
+const AUTO_SYNC_INTERVAL_MIN = 5
 
 let timer = null
 let started = false
@@ -147,8 +149,7 @@ async function runSync(source = 'auto') {
 }
 
 function intervalMs() {
-  const s = useSettingsStore()
-  return Math.max(1, Number(s.autoSyncIntervalMin) || 30) * 60_000
+  return AUTO_SYNC_INTERVAL_MIN * 60_000
 }
 
 function clearTimer() {
@@ -201,8 +202,8 @@ export function startAutoSync() {
   const settings = useSettingsStore()
   stopWatchers.push(
     watch(
-      [() => settings.autoSync, () => settings.autoSyncIntervalMin],
-      ([newAutoSync], [oldAutoSync]) => {
+      () => settings.autoSync,
+      (newAutoSync, oldAutoSync) => {
         scheduleTimer()
         // 开关刚打开时立即补一次同步
         if (newAutoSync && !oldAutoSync && isConfigured()) {

@@ -18,7 +18,6 @@ const DEFAULT_CONTEXT_MAX_TOKENS = 200
 const DEFAULT_ARTICLE_MAX_TOKENS = 2000
 const DEFAULT_REQUEST_TIMEOUT = 30
 const DEFAULT_AUTO_SYNC = true
-const DEFAULT_AUTO_SYNC_INTERVAL_MIN = 5
 
 function toPositiveNumber(value, fallback) {
   const num = Number(value)
@@ -75,7 +74,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const supabaseUrl = ref('')
   const supabaseAnonKey = ref('')
   const autoSync = ref(DEFAULT_AUTO_SYNC)
-  const autoSyncIntervalMin = ref(DEFAULT_AUTO_SYNC_INTERVAL_MIN)
   const debugMode = ref(false)
 
   const activeProvider = computed(() =>
@@ -172,10 +170,6 @@ export const useSettingsStore = defineStore('settings', () => {
       supabaseUrl.value = data.supabaseUrl || ''
       supabaseAnonKey.value = data.supabaseAnonKey || ''
       autoSync.value = data.autoSync !== undefined ? !!data.autoSync : DEFAULT_AUTO_SYNC
-      // 2026-08-10：默认同步间隔改为 5 分钟，旧存储中的 30（原默认值）一并迁移为 5
-      const storedInterval = data.autoSyncIntervalMin
-      const migratedInterval = storedInterval === 30 ? 5 : storedInterval
-      autoSyncIntervalMin.value = Math.min(1440, Math.max(1, toPositiveNumber(migratedInterval, DEFAULT_AUTO_SYNC_INTERVAL_MIN)))
       debugMode.value = !!data.debugMode
     } catch (e) {
       console.error('加载设置失败:', e)
@@ -202,7 +196,6 @@ export const useSettingsStore = defineStore('settings', () => {
         supabaseUrl: supabaseUrl.value,
         supabaseAnonKey: supabaseAnonKey.value,
         autoSync: autoSync.value,
-        autoSyncIntervalMin: autoSyncIntervalMin.value,
         debugMode: debugMode.value
       }))
     } catch (e) {
@@ -228,7 +221,6 @@ export const useSettingsStore = defineStore('settings', () => {
       supabaseUrl: supabaseUrl.value,
       supabaseAnonKey: supabaseAnonKey.value,
       autoSync: autoSync.value,
-      autoSyncIntervalMin: autoSyncIntervalMin.value,
       debugMode: debugMode.value
     }
   }
@@ -250,7 +242,6 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.supabaseUrl !== undefined) supabaseUrl.value = data.supabaseUrl
     if (data.supabaseAnonKey !== undefined) supabaseAnonKey.value = data.supabaseAnonKey
     if (data.autoSync !== undefined) autoSync.value = !!data.autoSync
-    if (data.autoSyncIntervalMin !== undefined) autoSyncIntervalMin.value = Math.min(1440, Math.max(1, toPositiveNumber(data.autoSyncIntervalMin, DEFAULT_AUTO_SYNC_INTERVAL_MIN)))
     if (data.debugMode !== undefined) debugMode.value = !!data.debugMode
     applyTheme()
     saveSettings()
@@ -258,7 +249,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   loadSettings()
 
-  watch([providers, activeProviderId, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, username, supabaseUrl, supabaseAnonKey, autoSync, autoSyncIntervalMin, debugMode], saveSettings, { deep: true })
+  watch([providers, activeProviderId, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, username, supabaseUrl, supabaseAnonKey, autoSync, debugMode], saveSettings, { deep: true })
 
   return {
     providers,
@@ -277,7 +268,6 @@ export const useSettingsStore = defineStore('settings', () => {
     supabaseUrl,
     supabaseAnonKey,
     autoSync,
-    autoSyncIntervalMin,
     debugMode,
     isDark,
     setActiveProvider,
