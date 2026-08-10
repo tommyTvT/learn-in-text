@@ -39,6 +39,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const contextMaxTokens = ref(DEFAULT_CONTEXT_MAX_TOKENS)
   const articleMaxTokens = ref(DEFAULT_ARTICLE_MAX_TOKENS)
   const requestTimeout = ref(DEFAULT_REQUEST_TIMEOUT)
+  const username = ref('')
+  const supabaseUrl = ref('')
+  const supabaseAnonKey = ref('')
 
   const selectedProvider = computed(() => AI_PROVIDERS[aiProvider.value] || null)
   const isPreset = computed(() => aiProvider.value !== CUSTOM)
@@ -105,6 +108,9 @@ export const useSettingsStore = defineStore('settings', () => {
         contextMaxTokens.value = toPositiveNumber(data.contextMaxTokens, DEFAULT_CONTEXT_MAX_TOKENS)
         articleMaxTokens.value = toPositiveNumber(data.articleMaxTokens, DEFAULT_ARTICLE_MAX_TOKENS)
         requestTimeout.value = toPositiveNumber(data.requestTimeout, DEFAULT_REQUEST_TIMEOUT)
+        username.value = data.username || ''
+        supabaseUrl.value = data.supabaseUrl || ''
+        supabaseAnonKey.value = data.supabaseAnonKey || ''
       } else {
         applyProvider('deepseek')
       }
@@ -126,7 +132,10 @@ export const useSettingsStore = defineStore('settings', () => {
         basicInfoMaxTokens: basicInfoMaxTokens.value,
         contextMaxTokens: contextMaxTokens.value,
         articleMaxTokens: articleMaxTokens.value,
-        requestTimeout: requestTimeout.value
+        requestTimeout: requestTimeout.value,
+        username: username.value,
+        supabaseUrl: supabaseUrl.value,
+        supabaseAnonKey: supabaseAnonKey.value
       }))
     } catch (e) {
       console.error('保存设置失败:', e)
@@ -148,7 +157,10 @@ export const useSettingsStore = defineStore('settings', () => {
       basicInfoMaxTokens: basicInfoMaxTokens.value,
       contextMaxTokens: contextMaxTokens.value,
       articleMaxTokens: articleMaxTokens.value,
-      requestTimeout: requestTimeout.value
+      requestTimeout: requestTimeout.value,
+      username: username.value,
+      supabaseUrl: supabaseUrl.value,
+      supabaseAnonKey: supabaseAnonKey.value
     }
   }
 
@@ -167,13 +179,16 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.contextMaxTokens !== undefined) contextMaxTokens.value = toPositiveNumber(data.contextMaxTokens, DEFAULT_CONTEXT_MAX_TOKENS)
     if (data.articleMaxTokens !== undefined) articleMaxTokens.value = toPositiveNumber(data.articleMaxTokens, DEFAULT_ARTICLE_MAX_TOKENS)
     if (data.requestTimeout !== undefined) requestTimeout.value = toPositiveNumber(data.requestTimeout, DEFAULT_REQUEST_TIMEOUT)
+    if (data.username !== undefined) username.value = data.username
+    if (data.supabaseUrl !== undefined) supabaseUrl.value = data.supabaseUrl
+    if (data.supabaseAnonKey !== undefined) supabaseAnonKey.value = data.supabaseAnonKey
     applyTheme()
     saveSettings()
   }
 
   loadSettings()
 
-  watch([aiProvider, aiEndpoint, aiApiKey, aiModel, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout], saveSettings)
+  watch([aiProvider, aiEndpoint, aiApiKey, aiModel, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, username, supabaseUrl, supabaseAnonKey], saveSettings)
 
   return {
     aiProvider,
@@ -186,6 +201,9 @@ export const useSettingsStore = defineStore('settings', () => {
     contextMaxTokens,
     articleMaxTokens,
     requestTimeout,
+    username,
+    supabaseUrl,
+    supabaseAnonKey,
     selectedProvider,
     isPreset,
     isDark,

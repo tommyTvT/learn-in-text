@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useSettingsStore, AI_PROVIDERS } from '../stores/settings'
 import { testConnection } from '../services/ai'
 import { exportService } from '../services/db'
+import { testConnection as testCloudConnection, pushAll, pullAll, clearCloud } from '../services/sync'
 
 const settingsStore = useSettingsStore()
 
@@ -24,6 +25,63 @@ const exporting = ref(false)
 const importing = ref(false)
 const showDevOptions = ref(false)
 const dataStats = ref(null)
+
+// 云同步状态
+const cloudTesting = ref(false)
+const cloudPushing = ref(false)
+const cloudPulling = ref(false)
+const cloudClearing = ref(false)
+const cloudResult = ref(null)
+
+async function handleTestCloudConnection() {
+  cloudTesting.value = true
+  cloudResult.value = null
+  try {
+    cloudResult.value = await testCloudConnection()
+  } catch (error) {
+    cloudResult.value = { success: false, message: error.message }
+  } finally {
+    cloudTesting.value = false
+  }
+}
+
+async function handlePush() {
+  cloudPushing.value = true
+  cloudResult.value = null
+  try {
+    cloudResult.value = await pushAll()
+  } catch (error) {
+    cloudResult.value = { success: false, message: error.message }
+  } finally {
+    cloudPushing.value = false
+  }
+}
+
+async function handlePull() {
+  if (!confirm('拉取将把云端数据合并到本地。确定继续？')) return
+  cloudPulling.value = true
+  cloudResult.value = null
+  try {
+    cloudResult.value = await pullAll()
+  } catch (error) {
+    cloudResult.value = { success: false, message: error.message }
+  } finally {
+    cloudPulling.value = false
+  }
+}
+
+async function handleClearCloud() {
+  if (!confirm('确定要清除该用户名在云端的所有数据吗？此操作不可恢复。')) return
+  cloudClearing.value = true
+  cloudResult.value = null
+  try {
+    cloudResult.value = await clearCloud()
+  } catch (error) {
+    cloudResult.value = { success: false, message: error.message }
+  } finally {
+    cloudClearing.value = false
+  }
+}
 
 async function handleTestConnection() {
   testing.value = true
@@ -268,6 +326,89 @@ onMounted(() => {
             ]"
           >
             {{ testResult.message }}
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+        <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">云同步</h2>
+        <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
+          将本地数据备份到 Supabase 云端，支持跨设备同步。使用用户名隔离数据，不同用户名的数据互不干扰。
+        </p>
+
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">用户名</label>
+            <input
+              v-model="settingsStore.username"
+              type="text"
+              placeholder="请输入用户名，用于区分不同的同步数据"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+            />
+            <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+              跨设备同步时，在另一台设备输入相同的用户名即可共享数据
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">Supabase 项目地址</label>
+            <input
+              v-model="settingsStore.supabaseUrl"
+              type="text"
+              placeholder="https://xxxx.supabase.co"
+              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+            />
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">Supabase anon key</label>
+            <input
+              v-model="settingsStore.supabaseAnonKey"
+              type="text"
+              placeholder="eyJhbGciOi..."
+              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+            />
+          </div>
+
+          <div class="flex flex-wrap gap-3">
+            <button
+              @click="handleTestCloudConnection"
+              :disabled="cloudTesting || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              class="px-4 py-2 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ cloudTesting ? '测试中...' : '测试连接' }}
+            </button>
+            <button
+              @click="handlePush"
+              :disabled="cloudPushing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ cloudPushing ? '推送中...' : '推送到云端' }}
+            </button>
+            <button
+              @click="handlePull"
+              :disabled="cloudPulling || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ cloudPulling ? '拉取中...' : '从云端拉取' }}
+            </button>
+            <button
+              @click="handleClearCloud"
+              :disabled="cloudClearing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ cloudClearing ? '清除中...' : '清除云端数据' }}
+            </button>
+          </div>
+
+          <div
+            v-if="cloudResult"
+            :class="[
+              'p-3 rounded-md text-sm',
+              cloudResult.success ? 'bg-green-50 dark:bg-neutral-800 text-green-800 dark:text-green-400' : 'bg-red-50 dark:bg-neutral-800 text-red-800 dark:text-red-400'
+            ]"
+          >
+            {{ cloudResult.message }}
           </div>
         </div>
       </div>

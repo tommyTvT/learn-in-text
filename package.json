@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.1",
     "dexie": "^4.4.4",
     "openai": "^6.45.0",
     "pinia": "^3.0.4",

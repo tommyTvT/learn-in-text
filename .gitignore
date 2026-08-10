@@ -16,6 +16,10 @@ dist-ssr
 .vscode/*
 !.vscode/extensions.json
 .idea
+opencode.json
+.codebuddy
+.qoder
+favicon.png
 .DS_Store
 *.suo
 *.ntvs*
