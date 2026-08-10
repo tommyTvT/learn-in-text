@@ -25,6 +25,7 @@ const tabItems = [
     ],
   },
 ]
+
 </script>
 
 <template>

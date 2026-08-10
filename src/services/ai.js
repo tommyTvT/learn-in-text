@@ -1,16 +1,15 @@
-import OpenAI from 'openai'
 import { useSettingsStore, PRESET_PROVIDERS } from '../stores/settings'
 
-function getClient() {
+function getEndpoint() {
   const settings = useSettingsStore()
   if (!settings.isConfigured()) {
     throw new Error('请先在设置中配置AI接口')
   }
-  return new OpenAI({
-    baseURL: settings.aiEndpoint,
+  return {
+    baseURL: settings.aiEndpoint.replace(/\/+$/, ''),
     apiKey: settings.aiApiKey,
-    dangerouslyAllowBrowser: true
-  })
+    timeoutMs: (settings.requestTimeout || 30) * 1000
+  }
 }
 
 function getModel() {
@@ -19,16 +18,67 @@ function getModel() {
 }
 
 function chatOptions(options) {
-  const settings = useSettingsStore()
   return {
     ...options,
-    thinking: { type: 'disabled' },
-    timeout: (settings.requestTimeout || 30) * 1000
+    thinking: { type: 'disabled' }
+  }
+}
+
+/** 基于 fetch 的 OpenAI 兼容客户端，替代体积较大的 openai SDK */
+async function request(path, { body, timeoutMs, signal }) {
+  const { baseURL, apiKey } = getEndpoint()
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const onOuterAbort = () => ctrl.abort()
+  signal?.addEventListener('abort', onOuterAbort)
+  try {
+    const res = await fetch(baseURL + path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    })
+    if (!res.ok) {
+      let detail = ''
+      try {
+        const err = await res.json()
+        detail = err?.error?.message || err?.message || ''
+      } catch { /* ignore */ }
+      throw new Error(`请求失败 (${res.status}): ${detail}`.trim())
+    }
+    return await res.json()
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onOuterAbort)
+  }
+}
+
+async function createChatCompletion(params) {
+  const { timeoutMs } = getEndpoint()
+  return request('/chat/completions', { body: params, timeoutMs })
+}
+
+async function listModels() {
+  const { baseURL, apiKey, timeoutMs } = getEndpoint()
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(baseURL + '/models', {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: ctrl.signal
+    })
+    if (!res.ok) throw new Error(`请求失败 (${res.status})`)
+    return await res.json()
+  } finally {
+    clearTimeout(timer)
   }
 }
 
 export async function generateWordBasicInfo(word, context = '') {
-  const client = getClient()
   const model = getModel()
 
   const systemMessage = `你是英语词典助手。返回JSON格式，严格遵守以下规则：
@@ -47,7 +97,7 @@ export async function generateWordBasicInfo(word, context = '') {
     ? `请提供单词 "${word}" 的详细信息，参考以下上下文语境理解其含义：\n上下文："${context}"`
     : `请提供单词 "${word}" 的详细信息`
 
-  const response = await client.chat.completions.create(chatOptions({
+  const response = await createChatCompletion(chatOptions({
     model,
     messages: [
       { role: 'system', content: systemMessage },
@@ -61,7 +111,6 @@ export async function generateWordBasicInfo(word, context = '') {
 }
 
 export async function generateWordContextTranslation(word, context) {
-  const client = getClient()
   const model = getModel()
 
   const systemMessage = `你是英语词典助手。将上下文句子翻译成中文。
@@ -76,7 +125,7 @@ export async function generateWordContextTranslation(word, context) {
 示例：
 - 单词 read，上下文 "I read an interesting book yesterday" → {"contextTranslation": "我昨天**读**了一本有趣的书"}`
 
-  const response = await client.chat.completions.create(chatOptions({
+  const response = await createChatCompletion(chatOptions({
     model,
     messages: [
       { role: 'system', content: systemMessage },
@@ -147,7 +196,6 @@ const FORMAT_MAP = {
 }
 
 export async function generateArticle(words, options = {}) {
-  const client = getClient()
   const model = getModel()
 
   const {
@@ -211,7 +259,7 @@ export async function generateArticle(words, options = {}) {
     userContent = '请生成一篇英语文章，要求：\n' + lines.join('\n')
   }
 
-  const response = await client.chat.completions.create(chatOptions({
+  const response = await createChatCompletion(chatOptions({
     model,
     messages: [
       { role: 'system', content: systemMessage },
@@ -224,7 +272,6 @@ export async function generateArticle(words, options = {}) {
 }
 
 export async function generateArticleTitle(content, options = {}) {
-  const client = getClient()
   const model = getModel()
 
   const {
@@ -240,7 +287,7 @@ export async function generateArticleTitle(content, options = {}) {
     styleDesc = ARTICLE_STYLE_MAP[style] || '英语文章'
   }
 
-  const response = await client.chat.completions.create(chatOptions({
+  const response = await createChatCompletion(chatOptions({
     model,
     messages: [
       {
@@ -259,17 +306,15 @@ export async function generateArticleTitle(content, options = {}) {
 }
 
 export async function fetchModels() {
-  const client = getClient()
-  const list = await client.models.list({ timeout: (useSettingsStore().requestTimeout || 30) * 1000 })
+  const list = await listModels()
   return list.data.map(m => m.id).sort()
 }
 
 export async function testConnection() {
-  const client = getClient()
   const model = getModel()
 
   try {
-    const response = await client.chat.completions.create(chatOptions({
+    const response = await createChatCompletion(chatOptions({
       model,
       messages: [{ role: 'user', content: 'Hello' }],
       max_tokens: 5

@@ -22,25 +22,20 @@ export function getSupabase() {
     throw new Error('请先在设置页填写 Supabase 项目地址和 anon key')
   }
 
-  // 携带用户名请求头，配合云端 RLS 的 x-sync-user 校验（最小加固）
-  const username = settings.username?.trim() || ''
-
   let state = holder[GLOBAL_KEY]
   if (!state) {
     state = holder[GLOBAL_KEY] = { client: null, config: null }
   }
 
-  if (!state.client || state.config?.url !== url || state.config?.anonKey !== anonKey || state.config?.username !== username) {
+  if (!state.client || state.config?.url !== url || state.config?.anonKey !== anonKey) {
     state.client = createClient(url, anonKey, {
       auth: {
-        persistSession: false,
-        autoRefreshToken: false
-      },
-      global: {
-        headers: username ? { 'x-sync-user': username } : {}
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
       }
     })
-    state.config = { url, anonKey, username }
+    state.config = { url, anonKey }
   }
 
   return state.client

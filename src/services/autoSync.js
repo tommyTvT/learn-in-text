@@ -1,5 +1,6 @@
 import { ref, watch } from 'vue'
 import { useSettingsStore } from '../stores/settings'
+import { useAuthStore } from '../stores/auth'
 import { syncNow } from './sync'
 
 const LAST_SYNC_KEY = 'learn_in_text_last_sync'
@@ -96,7 +97,8 @@ export function requestSync() {
 
 function isConfigured() {
   const s = useSettingsStore()
-  return !!(s.username?.trim() && s.supabaseUrl?.trim() && s.supabaseAnonKey?.trim())
+  const auth = useAuthStore()
+  return !!(auth.isLoggedIn && s.supabaseUrl?.trim() && s.supabaseAnonKey?.trim())
 }
 
 function acquireLock() {

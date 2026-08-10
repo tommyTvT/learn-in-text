@@ -7,8 +7,26 @@ export default defineConfig({
   base: './',
   plugins: [vue(), tailwindcss()],
   build: {
-    // 构建前不清空 dist：产物文件名带内容哈希，index.html 始终引用最新文件，
-    // 直接覆盖构建即可（也避免某些环境下清空目录被拦截导致构建失败）
-    emptyOutDir: false
+    // 注意：不能改为 emptyOutDir: true。
+    // 本环境（CodeBuddy）的文件删除有安全防护，一次删除超过阈值会被拦截导致构建失败，
+    // 所以才保持 false。如需清理旧产物，运行 npm run clean:dist 手动清理。
+    emptyOutDir: false,
+    rolldownOptions: {
+      output: {
+        // 把体积较大的第三方库单独分包，利用浏览器缓存，加快二次访问
+        codeSplitting: {
+          groups: [
+            {
+              name: 'supabase',
+              test: /node_modules[\\/]@supabase/
+            },
+            {
+              name: 'vendor',
+              test: /node_modules[\\/](vue|vue-router|pinia)/
+            }
+          ]
+        }
+      }
+    }
   }
 })

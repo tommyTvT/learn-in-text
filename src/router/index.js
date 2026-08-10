@@ -1,10 +1,14 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import Home from '../views/Home.vue'
-import NewArticle from '../views/NewArticle.vue'
-import GenerateArticle from '../views/GenerateArticle.vue'
-import Reader from '../views/Reader.vue'
-import Vocabulary from '../views/Vocabulary.vue'
-import Settings from '../views/Settings.vue'
+
+const Home = () => import('../views/Home.vue')
+const NewArticle = () => import('../views/NewArticle.vue')
+const GenerateArticle = () => import('../views/GenerateArticle.vue')
+const Reader = () => import('../views/Reader.vue')
+const Vocabulary = () => import('../views/Vocabulary.vue')
+const Settings = () => import('../views/Settings.vue')
+const Login = () => import('../views/Login.vue')
+const Register = () => import('../views/Register.vue')
+const EmailVerified = () => import('../views/EmailVerified.vue')
 
 const routes = [
   {
@@ -26,7 +30,8 @@ const routes = [
     path: '/reader/:id',
     name: 'Reader',
     component: Reader,
-    props: true
+    props: true,
+    meta: { hideMobileTab: true }
   },
   {
     path: '/vocabulary',
@@ -37,6 +42,24 @@ const routes = [
     path: '/settings',
     name: 'Settings',
     component: Settings
+  },
+  {
+    path: '/login',
+    name: 'Login',
+    component: Login,
+    meta: { bare: true }
+  },
+  {
+    path: '/register',
+    name: 'Register',
+    component: Register,
+    meta: { bare: true }
+  },
+  {
+    path: '/email-verified',
+    name: 'EmailVerified',
+    component: EmailVerified,
+    meta: { bare: true }
   }
 ]
 

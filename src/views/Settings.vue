@@ -1,12 +1,17 @@
 ﻿<script setup>
 import { ref, computed, watch, onMounted } from 'vue'
+import { RouterLink } from 'vue-router'
 import { useSettingsStore } from '../stores/settings'
+import { useAuthStore } from '../stores/auth'
 import { testConnection, fetchModels } from '../services/ai'
 import { exportService } from '../services/db'
 import { testConnection as testCloudConnection, syncNow, clearCloud } from '../services/sync'
 import { lastSyncState, setLastSyncState } from '../services/autoSync'
 
 const settingsStore = useSettingsStore()
+const authStore = useAuthStore()
+
+const isLoggedIn = computed(() => authStore.isLoggedIn)
 
 const activeProvider = computed(() => settingsStore.activeProvider)
 const showApiKey = ref(false)
@@ -150,6 +155,26 @@ async function handleSync() {
   }
 }
 
+// 设置同步状态
+const settingsSyncing = ref(false)
+const settingsSyncResult = ref(null)
+
+async function handleSyncSettings() {
+  if (!isLoggedIn.value) return
+  settingsSyncing.value = true
+  settingsSyncResult.value = null
+  try {
+    // 先推送本地设置到云端（作为最新的），再尝试从云端拉取
+    await settingsStore.pushToCloud()
+    await settingsStore.syncFromCloud()
+    settingsSyncResult.value = { success: true, message: '设置已同步到云端' }
+  } catch (error) {
+    settingsSyncResult.value = { success: false, message: error.message }
+  } finally {
+    settingsSyncing.value = false
+  }
+}
+
 async function handleClearCloud() {
   if (!confirm('确定要清除该用户名在云端的所有数据吗？此操作不可恢复。')) return
   cloudClearing.value = true
@@ -161,6 +186,11 @@ async function handleClearCloud() {
   } finally {
     cloudClearing.value = false
   }
+}
+
+async function handleLogout() {
+  if (!confirm('确定要退出登录吗？本地数据不受影响。')) return
+  await authStore.logout()
 }
 
 async function handleTestConnection() {
@@ -251,6 +281,50 @@ onMounted(() => {
     <div class="mb-6">
       <h1 class="text-3xl font-bold text-gray-900 dark:text-neutral-100 mb-2">设置</h1>
       <p class="text-gray-600 dark:text-neutral-400">配置AI接口和其他设置</p>
+    </div>
+
+    <!-- 用户信息 -->
+    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 mb-6">
+      <template v-if="isLoggedIn">
+        <div class="flex items-center justify-between gap-4">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center font-semibold shrink-0">
+              {{ authStore.username.charAt(0).toUpperCase() }}
+            </div>
+            <div>
+              <div class="font-medium text-gray-900 dark:text-neutral-100">@{{ authStore.username }}</div>
+              <div class="text-xs text-gray-500 dark:text-neutral-400">已登录，云端同步可用</div>
+            </div>
+          </div>
+          <button
+            @click="handleLogout"
+            class="shrink-0 px-3 py-1.5 text-sm text-gray-600 dark:text-neutral-400 border border-gray-300 dark:border-neutral-700 rounded-md hover:text-red-600 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-800 cursor-pointer"
+          >
+            退出登录
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="flex items-center justify-between gap-4">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full bg-gray-200 dark:bg-neutral-700 text-gray-500 dark:text-neutral-400 flex items-center justify-center shrink-0">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+              </svg>
+            </div>
+            <div>
+              <div class="font-medium text-gray-900 dark:text-neutral-100">未登录</div>
+              <div class="text-xs text-gray-500 dark:text-neutral-400">登录后可启用云同步</div>
+            </div>
+          </div>
+          <RouterLink
+            to="/login"
+            class="shrink-0 px-4 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+          >
+            登录 / 注册
+          </RouterLink>
+        </div>
+      </template>
     </div>
 
     <div class="space-y-6">
@@ -491,45 +565,9 @@ onMounted(() => {
 
       <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">云同步</h2>
-        <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
-          将本地数据备份到 Supabase 云端，支持跨设备同步。使用用户名隔离数据，不同用户名的数据互不干扰。
-        </p>
 
         <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">用户名</label>
-            <input
-              v-model="settingsStore.username"
-              type="text"
-              placeholder="请输入用户名，用于区分不同的同步数据"
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-            />
-            <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-              跨设备同步时，在另一台设备输入相同的用户名即可共享数据
-            </p>
-          </div>
-
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">Supabase 项目地址</label>
-            <input
-              v-model="settingsStore.supabaseUrl"
-              type="text"
-              placeholder="https://xxxx.supabase.co"
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-            />
-          </div>
-
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">Supabase anon key</label>
-            <input
-              v-model="settingsStore.supabaseAnonKey"
-              type="text"
-              placeholder="eyJhbGciOi..."
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-            />
-          </div>
-
-          <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+          <div v-if="isLoggedIn" class="border-t border-gray-200 dark:border-neutral-800 pt-4">
             <div class="flex items-start justify-between gap-4">
               <div>
                 <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">自动同步</h3>
@@ -570,18 +608,35 @@ onMounted(() => {
           <div class="flex flex-wrap gap-3">
             <button
               @click="handleTestCloudConnection"
-              :disabled="cloudTesting || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              :disabled="cloudTesting || !isLoggedIn"
               class="px-4 py-2 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {{ cloudTesting ? '测试中...' : '测试连接' }}
             </button>
             <button
               @click="handleSync"
-              :disabled="cloudSyncing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              :disabled="cloudSyncing || !isLoggedIn"
               class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {{ cloudSyncing ? '同步中...' : '立即同步' }}
             </button>
+            <button
+              @click="handleSyncSettings"
+              :disabled="settingsSyncing || !isLoggedIn"
+              class="px-4 py-2 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ settingsSyncing ? '同步中...' : '同步设置' }}
+            </button>
+          </div>
+
+          <div
+            v-if="settingsSyncResult"
+            :class="[
+              'p-3 rounded-md text-sm',
+              settingsSyncResult.success ? 'bg-green-50 dark:bg-neutral-800 text-green-800 dark:text-green-400' : 'bg-red-50 dark:bg-neutral-800 text-red-800 dark:text-red-400'
+            ]"
+          >
+            {{ settingsSyncResult.message }}
           </div>
 
           <div
@@ -752,7 +807,7 @@ onMounted(() => {
             <h3 class="text-sm font-medium text-red-700 dark:text-red-400 mb-2">危险操作</h3>
             <button
               @click="handleClearCloud"
-              :disabled="cloudClearing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              :disabled="cloudClearing || !isLoggedIn"
               class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {{ cloudClearing ? '清除中...' : '清除云端数据' }}

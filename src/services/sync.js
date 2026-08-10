@@ -1,6 +1,6 @@
 import { getSupabase } from '../lib/supabase'
 import { db, tombstoneKey } from './db'
-import { useSettingsStore } from '../stores/settings'
+import { useAuthStore } from '../stores/auth'
 
 const TABLES = ['articles', 'words', 'word_marks', 'context_translations']
 
@@ -11,10 +11,10 @@ const ts = (v) => (v ? new Date(v).getTime() : 0)
 const nowIso = () => new Date().toISOString()
 
 function requireUsername() {
-  const settings = useSettingsStore()
-  const name = settings.username?.trim()
+  const auth = useAuthStore()
+  const name = auth.username?.trim()
   if (!name) {
-    throw new Error('请先填写用户名')
+    throw new Error('请先登录后再同步')
   }
   return name
 }

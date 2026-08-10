@@ -1,7 +1,16 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
+import { useAuthStore } from './auth'
+import { fetchCloudSettings, pushCloudSettings } from '../services/settingsSync'
 
 const STORAGE_KEY = 'learn_in_text_settings'
+// 记录本地设置最后修改/同步时间，用于云端设置 LWW 冲突解决
+const SETTINGS_TIME_KEY = 'learn_in_text_settings_time'
+
+// 云存储（Supabase）内置配置：来自 .env 中的 VITE_ 环境变量，
+// 让用户无需在设置页手动输入。配置为空时需在 .env 中填写。
+const BUILTIN_SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || '').trim()
+const BUILTIN_SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
 
 export const PRESET_PROVIDERS = {
   deepseek: {
@@ -75,6 +84,28 @@ export const useSettingsStore = defineStore('settings', () => {
   const supabaseAnonKey = ref('')
   const autoSync = ref(DEFAULT_AUTO_SYNC)
   const debugMode = ref(false)
+
+  // ---- 设置同步（LWW）状态 ----
+  // 本地最后修改时间戳；应用云端设置时不计入「本地修改」，避免触发回传循环
+  let silentApply = false
+  const syncedAt = ref(0)         // 上次成功与云端同步的时间（成功拉取/推送后更新）
+  const cloudSyncing = ref(false) // 同步进行中标志，避免并发
+
+  function loadSyncTimes() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(SETTINGS_TIME_KEY) || 'null')
+      syncedAt.value = raw?.syncedAt || 0
+    } catch {
+      syncedAt.value = 0
+    }
+  }
+  function persistSyncTimes() {
+    try {
+      localStorage.setItem(SETTINGS_TIME_KEY, JSON.stringify({ syncedAt: syncedAt.value }))
+    } catch {
+      // 忽略存储异常
+    }
+  }
 
   const activeProvider = computed(() =>
     providers.value.find(p => p.id === activeProviderId.value) || null
@@ -167,8 +198,9 @@ export const useSettingsStore = defineStore('settings', () => {
       articleMaxTokens.value = toPositiveNumber(data.articleMaxTokens, DEFAULT_ARTICLE_MAX_TOKENS)
       requestTimeout.value = toPositiveNumber(data.requestTimeout, DEFAULT_REQUEST_TIMEOUT)
       username.value = data.username || ''
-      supabaseUrl.value = data.supabaseUrl || ''
-      supabaseAnonKey.value = data.supabaseAnonKey || ''
+      // 内置云存储配置：未在本地保存过则使用 .env 中的内置值，用户无需手动输入
+      supabaseUrl.value = data.supabaseUrl || BUILTIN_SUPABASE_URL
+      supabaseAnonKey.value = data.supabaseAnonKey || BUILTIN_SUPABASE_ANON_KEY
       autoSync.value = data.autoSync !== undefined ? !!data.autoSync : DEFAULT_AUTO_SYNC
       debugMode.value = !!data.debugMode
     } catch (e) {
@@ -245,11 +277,96 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.debugMode !== undefined) debugMode.value = !!data.debugMode
     applyTheme()
     saveSettings()
+    // 从备份导入设置视为本地修改，触发云端回传；应用云端设置时跳过
+    if (!silentApply) scheduleUpload()
+  }
+
+  // ---- 设置同步方法 ----
+
+  /** 将当前设置整体导出为 JSON 对象（用于云端存储）。
+   *  排除 supabaseUrl / supabaseAnonKey / username：这些是本机环境配置（.env 内置），
+   *  不应被云端设置覆盖。 */
+  function exportSettingsPayload() {
+    const s = exportSettings()
+    const { supabaseUrl, supabaseAnonKey, username, ...rest } = s
+    return rest
+  }
+
+  /** 将云端设置应用到本地（不标记为本地修改）。同样排除环境配置字段。 */
+  function applyCloudSettings(payload) {
+    const { supabaseUrl, supabaseAnonKey, username, ...rest } = payload || {}
+    silentApply = true
+    try {
+      importSettings(rest)
+    } finally {
+      silentApply = false
+    }
+  }
+
+  /** 登录后从云端拉取设置：云端较新则以云端覆盖本地 */
+  async function syncFromCloud() {
+    const auth = useAuthStore()
+    const username = auth.username?.trim()
+    if (!username) return
+
+    cloudSyncing.value = true
+    try {
+      const cloud = await fetchCloudSettings(username)
+      if (!cloud) {
+        // 云端无记录：上传本地设置（首登）
+        syncedAt.value = Date.now()
+        persistSyncTimes()
+        await pushCloudSettings(username, exportSettingsPayload(), syncedAt.value)
+        return
+      }
+      // LWW：仅当云端较新且本地未在云端之后修改过 → 用云端覆盖本地
+      if (cloud.updatedAt > syncedAt.value) {
+        applyCloudSettings(cloud.settings)
+      }
+      syncedAt.value = Math.max(syncedAt.value, cloud.updatedAt)
+      persistSyncTimes()
+    } finally {
+      cloudSyncing.value = false
+    }
+  }
+
+  /** 本地设置变更后上传到云端 */
+  async function pushToCloud() {
+    const auth = useAuthStore()
+    const username = auth.username?.trim()
+    if (!username || cloudSyncing.value) return
+
+    const now = Date.now()
+    if (now - syncedAt.value < 3000) return // 与拉取刚同步后避免立即回传
+
+    cloudSyncing.value = true
+    try {
+      syncedAt.value = now
+      persistSyncTimes()
+      await pushCloudSettings(username, exportSettingsPayload(), now)
+    } finally {
+      cloudSyncing.value = false
+    }
+  }
+
+  // 上传防抖
+  let uploadTimer = null
+  function scheduleUpload() {
+    if (uploadTimer) clearTimeout(uploadTimer)
+    uploadTimer = setTimeout(() => {
+      uploadTimer = null
+      pushToCloud()
+    }, 800)
   }
 
   loadSettings()
+  loadSyncTimes()
 
-  watch([providers, activeProviderId, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, username, supabaseUrl, supabaseAnonKey, autoSync, debugMode], saveSettings, { deep: true })
+  watch([providers, activeProviderId, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, username, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
+    if (silentApply) return
+    saveSettings()
+    scheduleUpload()
+  }, { deep: true })
 
   return {
     providers,
@@ -279,6 +396,9 @@ export const useSettingsStore = defineStore('settings', () => {
     toggleTheme,
     applyTheme,
     exportSettings,
-    importSettings
+    importSettings,
+    syncFromCloud,
+    pushToCloud,
+    cloudSyncing
   }
 })
