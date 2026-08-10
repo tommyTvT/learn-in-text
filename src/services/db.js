@@ -9,11 +9,12 @@ function splitDefinition(def) {
 
 export const db = new Dexie('LearnInText')
 
-db.version(5).stores({
+db.version(6).stores({
   articles: '++id, title, content, createdAt, updatedAt',
   words: '++id, &[word+articleId], word, articleId, definitions, examples, source, updatedAt',
   wordMarks: '++id, articleId, wordId, occKey, [articleId+wordId], [articleId+occKey], createdAt',
-  contextTranslations: '++id, wordId, articleId, occKey, &[wordId+articleId+occKey], translation, createdAt'
+  contextTranslations: '++id, wordId, articleId, occKey, &[wordId+articleId+occKey], translation, createdAt',
+  tombstones: '++id, &[table+key], table, key, createdAt'
 })
 
 async function ensureSchema() {
@@ -30,6 +31,40 @@ async function ensureSchema() {
 }
 
 await ensureSchema()
+
+/**
+ * 稳定业务键（本地视角）：同步时云端记录经会话内 id 映射后也用同一规则拼键。
+ * - articles: title
+ * - words: word|本地articleId
+ * - word_marks / context_translations: word|本地articleId|occKey
+ * mark/translation 的 r 需带 word 字段（或 wordId 可查）。
+ */
+export function tombstoneKey(table, r) {
+  switch (table) {
+    case 'articles':
+      return r.title || ''
+    case 'words':
+      return `${r.word}|${r.articleId}`
+    case 'word_marks':
+    case 'context_translations':
+      return `${r.word}|${r.articleId}|${r.occKey || ''}`
+    default:
+      return ''
+  }
+}
+
+/** 记录一次本地删除事实（tombstone），供云端同步做删除传播。 */
+async function recordTombstone(table, r) {
+  let record = r
+  if (!r.word && (r.wordId != null)) {
+    const w = await db.words.get(r.wordId)
+    if (!w) return // 找不到对应单词，无法拼稳定键，放弃（同步侧会按级联处理）
+    record = { ...r, word: w.word }
+  }
+  const key = tombstoneKey(table, record)
+  if (!key) return
+  await db.tombstones.put({ table, key, createdAt: new Date() })
+}
 
 export const articleService = {
   async getAll() {
@@ -59,11 +94,14 @@ export const articleService = {
   },
 
   async delete(id) {
-    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, async () => {
+    const article = await db.articles.get(id)
+    if (!article) return
+    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.tombstones, async () => {
       await db.wordMarks.where('articleId').equals(id).delete()
       await db.contextTranslations.where('articleId').equals(id).delete()
       await db.words.where('articleId').equals(id).delete()
       await db.articles.delete(id)
+      await recordTombstone('articles', article)
     })
   }
 }
@@ -129,20 +167,24 @@ export const wordService = {
   },
 
   async delete(id) {
-    await db.transaction('rw', db.words, db.wordMarks, db.contextTranslations, async () => {
+    const word = await db.words.get(id)
+    if (!word) return
+    await db.transaction('rw', db.words, db.wordMarks, db.contextTranslations, db.tombstones, async () => {
       await db.wordMarks.where('wordId').equals(id).delete()
       await db.contextTranslations.where('wordId').equals(id).delete()
       await db.words.delete(id)
+      await recordTombstone('words', word)
     })
   },
 
   async deleteBySpelling(word) {
     const records = await this.getByWordAllArticles(word)
-    await db.transaction('rw', db.words, db.wordMarks, db.contextTranslations, async () => {
+    await db.transaction('rw', db.words, db.wordMarks, db.contextTranslations, db.tombstones, async () => {
       for (const record of records) {
         await db.wordMarks.where('wordId').equals(record.id).delete()
         await db.contextTranslations.where('wordId').equals(record.id).delete()
         await db.words.delete(record.id)
+        await recordTombstone('words', record)
       }
     })
   }
@@ -171,10 +213,13 @@ export const wordMarkService = {
   async toggleMark(wordId, articleId, occKey) {
     const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (existing) {
-      await db.wordMarks.delete(existing.id)
+      await db.transaction('rw', db.wordMarks, db.tombstones, db.words, async () => {
+        await db.wordMarks.delete(existing.id)
+        await recordTombstone('word_marks', existing)
+      })
       return false
     } else {
-      await db.wordMarks.add({ wordId, articleId, occKey, createdAt: new Date() })
+      await db.wordMarks.add({ wordId, articleId, occKey, createdAt: new Date(), updatedAt: new Date() })
       return true
     }
   },
@@ -182,14 +227,17 @@ export const wordMarkService = {
   async add(wordId, articleId, occKey) {
     const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (!existing) {
-      await db.wordMarks.add({ wordId, articleId, occKey, createdAt: new Date() })
+      await db.wordMarks.add({ wordId, articleId, occKey, createdAt: new Date(), updatedAt: new Date() })
     }
   },
 
   async remove(articleId, occKey) {
     const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (existing) {
-      await db.wordMarks.delete(existing.id)
+      await db.transaction('rw', db.wordMarks, db.tombstones, db.words, async () => {
+        await db.wordMarks.delete(existing.id)
+        await recordTombstone('word_marks', existing)
+      })
     }
   },
 
@@ -238,12 +286,15 @@ export const contextTranslationService = {
     const existing = await db.contextTranslations.where({ wordId, articleId, occKey }).first()
     if (!translation) {
       if (existing) {
-        await db.contextTranslations.delete(existing.id)
+        await db.transaction('rw', db.contextTranslations, db.tombstones, db.words, async () => {
+          await db.contextTranslations.delete(existing.id)
+          await recordTombstone('context_translations', existing)
+        })
       }
       return null
     }
     if (existing) {
-      await db.contextTranslations.update(existing.id, { translation })
+      await db.contextTranslations.update(existing.id, { translation, updatedAt: new Date() })
       return await db.contextTranslations.get(existing.id)
     } else {
       const id = await db.contextTranslations.add({
@@ -251,7 +302,8 @@ export const contextTranslationService = {
         articleId,
         occKey,
         translation,
-        createdAt: new Date()
+        createdAt: new Date(),
+        updatedAt: new Date()
       })
       return await db.contextTranslations.get(id)
     }

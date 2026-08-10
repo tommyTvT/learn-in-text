@@ -1,5 +1,5 @@
 import OpenAI from 'openai'
-import { useSettingsStore, AI_PROVIDERS } from '../stores/settings'
+import { useSettingsStore, PRESET_PROVIDERS } from '../stores/settings'
 
 function getClient() {
   const settings = useSettingsStore()
@@ -15,7 +15,7 @@ function getClient() {
 
 function getModel() {
   const settings = useSettingsStore()
-  return settings.aiModel || AI_PROVIDERS.deepseek.model
+  return settings.aiModel || PRESET_PROVIDERS.deepseek.model
 }
 
 function chatOptions(options) {
@@ -256,6 +256,12 @@ export async function generateArticleTitle(content, options = {}) {
   }))
 
   return response.choices[0].message.content.trim()
+}
+
+export async function fetchModels() {
+  const client = getClient()
+  const list = await client.models.list({ timeout: (useSettingsStore().requestTimeout || 30) * 1000 })
+  return list.data.map(m => m.id).sort()
 }
 
 export async function testConnection() {

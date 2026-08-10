@@ -1,24 +1,101 @@
 ﻿<script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useSettingsStore, AI_PROVIDERS } from '../stores/settings'
-import { testConnection } from '../services/ai'
+import { ref, computed, watch, onMounted } from 'vue'
+import { useSettingsStore } from '../stores/settings'
+import { testConnection, fetchModels } from '../services/ai'
 import { exportService } from '../services/db'
-import { testConnection as testCloudConnection, pushAll, pullAll, clearCloud } from '../services/sync'
+import { testConnection as testCloudConnection, syncNow, clearCloud } from '../services/sync'
+import { lastSyncState, setLastSyncState } from '../services/autoSync'
 
 const settingsStore = useSettingsStore()
 
+const activeProvider = computed(() => settingsStore.activeProvider)
 const showApiKey = ref(false)
 const apiKeyFocused = ref(false)
-const apiKeyInput = ref('')
 const apiKeyShown = computed(() =>
-  apiKeyFocused.value || showApiKey.value || !apiKeyInput.value
-    ? apiKeyInput.value
+  apiKeyFocused.value || showApiKey.value || !activeProvider.value?.apiKey
+    ? (activeProvider.value?.apiKey || '')
     : '••••••••'
 )
 function onApiKeyInput(e) {
-  apiKeyInput.value = e.target.value
-  settingsStore.aiApiKey = e.target.value
+  if (activeProvider.value) {
+    activeProvider.value.apiKey = e.target.value
+  }
 }
+function handleAddProvider() {
+  settingsStore.addCustomProvider()
+}
+function handleRemoveProvider(id) {
+  const provider = settingsStore.providers.find(p => p.id === id)
+  if (!confirm(`确定删除供应商「${provider?.name}」吗？其 API Key 配置将一并删除。`)) return
+  settingsStore.removeProvider(id)
+}
+
+// 模型列表自动获取
+const modelList = ref([])
+const modelsLoading = ref(false)
+const modelsError = ref('')
+const modelDropdownOpen = ref(false)
+const modelFilter = ref('')
+
+const filteredModels = computed(() => {
+  const keyword = modelFilter.value.trim().toLowerCase()
+  if (!keyword) return modelList.value
+  return modelList.value.filter(m => m.toLowerCase().includes(keyword))
+})
+
+async function handleFetchModels() {
+  modelsLoading.value = true
+  modelsError.value = ''
+  modelList.value = []
+  try {
+    modelList.value = await fetchModels()
+    if (!modelList.value.length) {
+      modelsError.value = '该接口未返回可用模型列表，请手动填写模型名称'
+    } else {
+      modelFilter.value = ''
+      modelDropdownOpen.value = true
+    }
+  } catch (error) {
+    modelsError.value = '获取失败：' + error.message
+  } finally {
+    modelsLoading.value = false
+  }
+}
+
+function onModelInput() {
+  modelFilter.value = activeProvider.value?.model || ''
+  if (modelList.value.length) {
+    modelDropdownOpen.value = true
+  }
+}
+
+function openModelDropdown() {
+  if (!modelList.value.length) return
+  modelFilter.value = ''
+  modelDropdownOpen.value = true
+}
+
+function selectModel(model) {
+  if (activeProvider.value) {
+    activeProvider.value.model = model
+  }
+  modelDropdownOpen.value = false
+}
+
+function closeModelDropdown() {
+  // 延迟关闭，让下拉项的点击事件先触发
+  setTimeout(() => {
+    modelDropdownOpen.value = false
+  }, 150)
+}
+
+watch(() => settingsStore.activeProviderId, () => {
+  modelList.value = []
+  modelsError.value = ''
+  modelDropdownOpen.value = false
+  modelFilter.value = ''
+  testResult.value = null
+})
 const testing = ref(false)
 const testResult = ref(null)
 const exporting = ref(false)
@@ -28,10 +105,24 @@ const dataStats = ref(null)
 
 // 云同步状态
 const cloudTesting = ref(false)
-const cloudPushing = ref(false)
-const cloudPulling = ref(false)
+const cloudSyncing = ref(false)
 const cloudClearing = ref(false)
 const cloudResult = ref(null)
+// 开发者选项中的清除云端数据结果提示
+const devCloudResult = ref(null)
+
+// 上次同步状态展示（自动同步或手动同步后都会更新）
+const syncStatusText = computed(() => {
+  if (!lastSyncState.value) return '尚未同步过'
+  const d = new Date(lastSyncState.value.at)
+  const pad = (n) => String(n).padStart(2, '0')
+  const time = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  if (lastSyncState.value.success) {
+    return `${time} · 同步成功`
+  }
+  const msg = (lastSyncState.value.message || '同步失败').slice(0, 60)
+  return `${time} · 同步失败：${msg}`
+})
 
 async function handleTestCloudConnection() {
   cloudTesting.value = true
@@ -45,39 +136,29 @@ async function handleTestCloudConnection() {
   }
 }
 
-async function handlePush() {
-  cloudPushing.value = true
+async function handleSync() {
+  if (!confirm('将执行双向差异同步：云端与本地按更新时间合并，删除操作会双向传播。确定继续？')) return
+  cloudSyncing.value = true
   cloudResult.value = null
   try {
-    cloudResult.value = await pushAll()
+    cloudResult.value = await syncNow()
+    setLastSyncState(true, cloudResult.value.message, cloudResult.value.detail, 'manual')
   } catch (error) {
     cloudResult.value = { success: false, message: error.message }
+    setLastSyncState(false, error.message)
   } finally {
-    cloudPushing.value = false
-  }
-}
-
-async function handlePull() {
-  if (!confirm('拉取将把云端数据合并到本地。确定继续？')) return
-  cloudPulling.value = true
-  cloudResult.value = null
-  try {
-    cloudResult.value = await pullAll()
-  } catch (error) {
-    cloudResult.value = { success: false, message: error.message }
-  } finally {
-    cloudPulling.value = false
+    cloudSyncing.value = false
   }
 }
 
 async function handleClearCloud() {
   if (!confirm('确定要清除该用户名在云端的所有数据吗？此操作不可恢复。')) return
   cloudClearing.value = true
-  cloudResult.value = null
+  devCloudResult.value = null
   try {
-    cloudResult.value = await clearCloud()
+    devCloudResult.value = await clearCloud()
   } catch (error) {
-    cloudResult.value = { success: false, message: error.message }
+    devCloudResult.value = { success: false, message: error.message }
   } finally {
     cloudClearing.value = false
   }
@@ -161,36 +242,7 @@ async function loadStats() {
   }
 }
 
-async function clearAllData() {
-  if (!confirm('⚠️ 此操作将删除所有数据（文章、单词、标记），且不可恢复。\n\n确定要清除所有数据吗？')) return
-  if (!confirm('再次确认：真的要删除所有数据吗？')) return
-
-  try {
-    await exportService.clearAllData()
-    localStorage.clear()
-    alert('所有数据已清除，页面将刷新')
-    window.location.reload()
-  } catch (error) {
-    alert('清除失败: ' + error.message)
-  }
-}
-
-async function resetDatabase() {
-  if (!confirm('⚠️ 此操作将删除整个数据库并重建，所有数据将丢失。\n\n确定要重置数据库吗？')) return
-  if (!confirm('再次确认：真的要重置数据库吗？')) return
-
-  try {
-    await exportService.deleteDatabase()
-    localStorage.clear()
-    alert('数据库已重置，页面将刷新')
-    window.location.reload()
-  } catch (error) {
-    alert('重置失败: ' + error.message)
-  }
-}
-
 onMounted(() => {
-  apiKeyInput.value = settingsStore.aiApiKey
   loadStats()
 })
 </script>
@@ -228,78 +280,186 @@ onMounted(() => {
       <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">AI 接口配置</h2>
         <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
-          配置OpenAI兼容的API接口，用于生成单词信息和文章
+          支持配置多个供应商并随时切换。预设 DeepSeek 只需填写 API Key；也可以添加自定义 OpenAI 兼容接口（如阿里百炼、OpenAI 等）。
         </p>
 
         <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">AI 厂商</label>
-            <select
-              v-model="settingsStore.aiProvider"
-              @change="settingsStore.applyProvider(settingsStore.aiProvider)"
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          <!-- 供应商列表 -->
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div
+              v-for="provider in settingsStore.providers"
+              :key="provider.id"
+              @click="settingsStore.setActiveProvider(provider.id)"
+              :class="[
+                'relative cursor-pointer rounded-lg border p-3 transition-colors',
+                settingsStore.activeProviderId === provider.id
+                  ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200 dark:border-neutral-400 dark:bg-neutral-800 dark:ring-neutral-600'
+                  : 'border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800'
+              ]"
             >
-              <option v-for="(provider, key) in AI_PROVIDERS" :key="key" :value="key">
-                {{ provider.name }}（{{ provider.model }}）
-              </option>
-              <option value="custom">自定义</option>
-            </select>
-            <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-              选择预设厂商后只需填写 API Key，接口地址和模型已自动配置
-            </p>
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-medium text-gray-900 dark:text-neutral-100 truncate">{{ provider.name }}</span>
+                <span
+                  :class="[
+                    'shrink-0 text-xs px-2 py-0.5 rounded-full',
+                    provider.apiKey
+                      ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+                      : 'bg-gray-100 text-gray-500 dark:bg-neutral-700 dark:text-neutral-400'
+                  ]"
+                >
+                  {{ provider.apiKey ? '已配置' : '未配置 Key' }}
+                </span>
+              </div>
+              <div class="text-xs text-gray-500 dark:text-neutral-400 mt-1 truncate">
+                {{ provider.preset ? '预设 · ' : '' }}{{ provider.model || '未设置模型' }}
+              </div>
+            </div>
+
+            <button
+              @click="handleAddProvider"
+              class="rounded-lg border-2 border-dashed border-gray-300 dark:border-neutral-700 p-3 text-sm text-gray-500 dark:text-neutral-400 hover:border-blue-400 hover:text-blue-600 dark:hover:border-neutral-500 dark:hover:text-neutral-200 transition-colors"
+            >
+              + 添加自定义供应商
+            </button>
           </div>
 
-          <div v-if="settingsStore.isPreset" class="bg-gray-50 dark:bg-neutral-800 rounded-md p-3 text-sm text-gray-600 dark:text-neutral-400">
-            <div class="mb-1">接口地址：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ settingsStore.aiEndpoint }}</span></div>
-            <div>模型：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ settingsStore.aiModel }}</span></div>
-          </div>
+          <!-- 当前供应商配置 -->
+          <div v-if="activeProvider" class="border-t border-gray-200 dark:border-neutral-800 pt-4 space-y-4">
+            <div v-if="activeProvider.preset" class="bg-gray-50 dark:bg-neutral-800 rounded-md p-3 text-sm text-gray-600 dark:text-neutral-400">
+              接口地址：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ activeProvider.endpoint }}</span>
+            </div>
 
-          <div v-if="!settingsStore.isPreset">
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">API 端点</label>
-            <input
-              v-model="settingsStore.aiEndpoint"
-              type="text"
-              placeholder="https://api.openai.com/v1"
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-            />
-            <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-              OpenAI兼容接口地址，例如：https://api.openai.com/v1
-            </p>
-          </div>
+            <template v-if="!activeProvider.preset">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">供应商名称</label>
+                <input
+                  v-model="activeProvider.name"
+                  type="text"
+                  placeholder="例如：我的 OpenAI"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+                />
+              </div>
 
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">API Key</label>
-            <!-- 不使用密码输入框：部分手机的安全输入法无法粘贴，改用 text 输入框 + 隐藏时用点号遮挡 -->
-            <div class="relative">
-              <input
-                :value="apiKeyShown"
-                @input="onApiKeyInput"
-                @focus="apiKeyFocused = true"
-                @blur="apiKeyFocused = false"
-                type="text"
-                placeholder="sk-..."
-                class="w-full px-3 py-2 pr-12 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-              />
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">API 端点</label>
+                <input
+                  v-model="activeProvider.endpoint"
+                  type="text"
+                  placeholder="https://api.openai.com/v1"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  OpenAI兼容接口地址，例如：https://api.openai.com/v1
+                </p>
+              </div>
+            </template>
+
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">API Key</label>
+              <!-- 不使用密码输入框：部分手机的安全输入法无法粘贴，改用 text 输入框 + 隐藏时用点号遮挡 -->
+              <div class="relative">
+                <input
+                  :value="apiKeyShown"
+                  @input="onApiKeyInput"
+                  @focus="apiKeyFocused = true"
+                  @blur="apiKeyFocused = false"
+                  type="text"
+                  placeholder="sk-..."
+                  class="w-full px-3 py-2 pr-12 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+                />
+                <button
+                  @click="showApiKey = !showApiKey"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-sm text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-200"
+                >
+                  {{ showApiKey ? '隐藏' : '显示' }}
+                </button>
+              </div>
+              <p v-if="activeProvider.preset" class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                预设供应商只需填写 API Key，接口地址已自动配置，模型可使用默认值或自行修改
+              </p>
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">模型</label>
+              <div class="flex gap-2">
+                <div class="relative flex-1">
+                  <input
+                    v-model="activeProvider.model"
+                    @input="onModelInput"
+                    @focus="openModelDropdown"
+                    @blur="closeModelDropdown"
+                    @keydown.esc="modelDropdownOpen = false"
+                    type="text"
+                    placeholder="gpt-3.5-turbo"
+                    class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+                  />
+                  <button
+                    v-if="modelList.length"
+                    @mousedown.prevent="modelDropdownOpen = !modelDropdownOpen"
+                    type="button"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 px-1 text-gray-400 dark:text-neutral-500 hover:text-gray-600 dark:hover:text-neutral-300"
+                  >
+                    <svg
+                      :class="['w-4 h-4 transition-transform', modelDropdownOpen ? 'rotate-180' : '']"
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                    >
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+
+                  <!-- 自定义模型下拉面板 -->
+                  <div
+                    v-if="modelDropdownOpen && modelList.length"
+                    class="absolute z-20 left-0 right-0 mt-1 max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-lg"
+                  >
+                    <div class="sticky top-0 px-3 py-1.5 text-xs text-gray-400 dark:text-neutral-500 bg-gray-50 dark:bg-neutral-800 border-b border-gray-100 dark:border-neutral-700">
+                      共 {{ filteredModels.length }} 个模型{{ modelFilter ? '（已过滤）' : '' }}
+                    </div>
+                    <button
+                      v-for="m in filteredModels"
+                      :key="m"
+                      @mousedown.prevent="selectModel(m)"
+                      type="button"
+                      :class="[
+                        'block w-full text-left px-3 py-2 text-sm truncate transition-colors',
+                        m === activeProvider.model
+                          ? 'bg-blue-50 text-blue-700 font-medium dark:bg-neutral-700 dark:text-blue-400'
+                          : 'text-gray-700 dark:text-neutral-300 hover:bg-gray-100 dark:hover:bg-neutral-700'
+                      ]"
+                    >
+                      {{ m }}
+                    </button>
+                    <div
+                      v-if="!filteredModels.length"
+                      class="px-3 py-3 text-sm text-gray-400 dark:text-neutral-500 text-center"
+                    >
+                      没有匹配「{{ modelFilter }}」的模型
+                    </div>
+                  </div>
+                </div>
+                <button
+                  @click="handleFetchModels"
+                  :disabled="modelsLoading || !activeProvider.endpoint || !activeProvider.apiKey"
+                  class="shrink-0 px-3 py-2 text-sm bg-gray-100 dark:bg-neutral-700 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {{ modelsLoading ? '获取中...' : '获取模型列表' }}
+                </button>
+              </div>
+              <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                可手动填写，或点击「获取模型列表」从接口拉取可用模型后从下拉中选择
+                <span v-if="modelList.length">（已获取 {{ modelList.length }} 个模型）</span>
+              </p>
+              <p v-if="modelsError" class="text-xs text-red-600 dark:text-red-400 mt-1">{{ modelsError }}</p>
+            </div>
+
+            <div v-if="!activeProvider.preset" class="flex justify-end">
               <button
-                @click="showApiKey = !showApiKey"
-                class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-sm text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-200"
+                @click="handleRemoveProvider(activeProvider.id)"
+                class="px-3 py-1.5 text-sm text-red-600 dark:text-red-400 border border-red-300 dark:border-red-800 rounded-md hover:bg-red-50 dark:hover:bg-red-900/20"
               >
-                {{ showApiKey ? '隐藏' : '显示' }}
+                删除此供应商
               </button>
             </div>
-          </div>
-
-          <div v-if="!settingsStore.isPreset">
-            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">模型</label>
-            <input
-              v-model="settingsStore.aiModel"
-              type="text"
-              placeholder="gpt-3.5-turbo"
-              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-            />
-            <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-              例如：gpt-3.5-turbo, gpt-4, claude-3-sonnet 等
-            </p>
           </div>
 
           <div class="flex items-center space-x-3">
@@ -370,6 +530,64 @@ onMounted(() => {
             />
           </div>
 
+          <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">自动同步</h3>
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  打开应用、切回前台时自动同步，并按设定间隔在后台静默同步。全程无需手动操作，失败会在下次自动重试。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="settingsStore.autoSync"
+                @click="settingsStore.autoSync = !settingsStore.autoSync"
+                :class="[
+                  'relative w-11 h-6 rounded-full transition-colors shrink-0',
+                  settingsStore.autoSync ? 'bg-blue-600' : 'bg-gray-300 dark:bg-neutral-700'
+                ]"
+              >
+                <span
+                  :class="[
+                    'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                    settingsStore.autoSync ? 'translate-x-5' : ''
+                  ]"
+                />
+              </button>
+            </div>
+
+            <div v-if="settingsStore.autoSync" class="mt-4">
+              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">同步间隔</label>
+              <select
+                v-model.number="settingsStore.autoSyncIntervalMin"
+                class="w-full sm:w-64 px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option :value="5">每 5 分钟</option>
+                <option :value="15">每 15 分钟</option>
+                <option :value="30">每 30 分钟</option>
+                <option :value="60">每小时</option>
+                <option :value="120">每 2 小时</option>
+              </select>
+              <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                在浏览器打开期间按此间隔自动同步；页面关闭后不工作，下次打开时会立即补同步。
+              </p>
+            </div>
+
+            <div
+              class="mt-3 text-sm"
+              :class="
+                lastSyncState
+                  ? lastSyncState.success
+                    ? 'text-green-700 dark:text-green-400'
+                    : 'text-red-600 dark:text-red-400'
+                  : 'text-gray-500 dark:text-neutral-400'
+              "
+            >
+              上次同步：{{ syncStatusText }}
+            </div>
+          </div>
+
           <div class="flex flex-wrap gap-3">
             <button
               @click="handleTestCloudConnection"
@@ -379,25 +597,11 @@ onMounted(() => {
               {{ cloudTesting ? '测试中...' : '测试连接' }}
             </button>
             <button
-              @click="handlePush"
-              :disabled="cloudPushing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              @click="handleSync"
+              :disabled="cloudSyncing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
               class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {{ cloudPushing ? '推送中...' : '推送到云端' }}
-            </button>
-            <button
-              @click="handlePull"
-              :disabled="cloudPulling || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
-              class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {{ cloudPulling ? '拉取中...' : '从云端拉取' }}
-            </button>
-            <button
-              @click="handleClearCloud"
-              :disabled="cloudClearing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
-              class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {{ cloudClearing ? '清除中...' : '清除云端数据' }}
+              {{ cloudSyncing ? '同步中...' : '立即同步' }}
             </button>
           </div>
 
@@ -411,29 +615,6 @@ onMounted(() => {
             {{ cloudResult.message }}
           </div>
         </div>
-      </div>
-
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
-        <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">数据管理</h2>
-        <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
-          所有数据存储在浏览器本地，清除浏览器数据会丢失。建议定期备份。
-        </p>
-        <div class="flex flex-wrap gap-3">
-          <button
-            @click="exportAllData"
-            :disabled="exporting"
-            class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {{ exporting ? '导出中...' : '导出所有数据' }}
-          </button>
-          <label class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 cursor-pointer">
-            {{ importing ? '导入中...' : '导入所有数据' }}
-            <input type="file" accept=".json" @change="importAllData" class="hidden" :disabled="importing" />
-          </label>
-        </div>
-        <p class="text-xs text-gray-500 dark:text-neutral-400 mt-3">
-          导出包含：所有文章、单词、标记、AI设置。导入会自动合并，相同文章和单词会被跳过。
-        </p>
       </div>
 
       <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
@@ -451,6 +632,29 @@ onMounted(() => {
         </button>
 
         <div v-if="showDevOptions" class="mt-4 space-y-4">
+          <div>
+            <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300 mb-2">数据管理</h3>
+            <p class="text-xs text-gray-500 dark:text-neutral-400 mb-3">
+              所有数据存储在浏览器本地，清除浏览器数据会丢失。建议定期备份。
+            </p>
+            <div class="flex flex-wrap gap-3">
+              <button
+                @click="exportAllData"
+                :disabled="exporting"
+                class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {{ exporting ? '导出中...' : '导出所有数据' }}
+              </button>
+              <label class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 cursor-pointer">
+                {{ importing ? '导入中...' : '导入所有数据' }}
+                <input type="file" accept=".json" @change="importAllData" class="hidden" :disabled="importing" />
+              </label>
+            </div>
+            <p class="text-xs text-gray-500 dark:text-neutral-400 mt-3">
+              导出包含：所有文章、单词、标记、AI设置。导入会自动合并，相同文章和单词会被跳过。
+            </p>
+          </div>
+
           <div v-if="dataStats" class="bg-gray-50 dark:bg-neutral-800 rounded-lg p-4">
             <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300 mb-2">数据统计</h3>
             <div class="grid grid-cols-2 gap-2 text-sm">
@@ -538,25 +742,54 @@ onMounted(() => {
           </div>
 
           <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
-            <h3 class="text-sm font-medium text-red-700 dark:text-red-400 mb-2">危险操作</h3>
-            <div class="flex flex-wrap gap-3">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">调试模式</h3>
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  开启后，每次同步（手动或自动）都会在浏览器控制台（F12 → Console）输出同步时间、触发来源、耗时、各表推送/新增/更新/删除数量以及云端/本地记录数，便于排查同步问题。
+                </p>
+              </div>
               <button
-                @click="clearAllData"
-                class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+                type="button"
+                role="switch"
+                :aria-checked="settingsStore.debugMode"
+                @click="settingsStore.debugMode = !settingsStore.debugMode"
+                :class="[
+                  'relative w-11 h-6 rounded-full transition-colors shrink-0',
+                  settingsStore.debugMode ? 'bg-blue-600' : 'bg-gray-300 dark:bg-neutral-700'
+                ]"
               >
-                清除所有数据
-              </button>
-              <button
-                @click="resetDatabase"
-                class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
-              >
-                重置数据库
+                <span
+                  :class="[
+                    'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                    settingsStore.debugMode ? 'translate-x-5' : ''
+                  ]"
+                />
               </button>
             </div>
+          </div>
+
+          <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+            <h3 class="text-sm font-medium text-red-700 dark:text-red-400 mb-2">危险操作</h3>
+            <button
+              @click="handleClearCloud"
+              :disabled="cloudClearing || !settingsStore.supabaseUrl || !settingsStore.supabaseAnonKey || !settingsStore.username"
+              class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ cloudClearing ? '清除中...' : '清除云端数据' }}
+            </button>
             <p class="text-xs text-gray-500 dark:text-neutral-400 mt-2">
-              清除所有数据：删除 IndexedDB 所有表内容和 localStorage 设置<br>
-              重置数据库：删除整个 IndexedDB 数据库并重建（用于修复 schema 不一致问题）
+              删除该用户名在云端的所有数据（文章、单词、标记、翻译），不影响本地数据，此操作不可恢复
             </p>
+            <div
+              v-if="devCloudResult"
+              :class="[
+                'mt-3 p-3 rounded-md text-sm',
+                devCloudResult.success ? 'bg-green-50 dark:bg-neutral-800 text-green-800 dark:text-green-400' : 'bg-red-50 dark:bg-neutral-800 text-red-800 dark:text-red-400'
+              ]"
+            >
+              {{ devCloudResult.message }}
+            </div>
           </div>
         </div>
       </div>
