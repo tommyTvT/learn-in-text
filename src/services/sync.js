@@ -4,6 +4,10 @@ import { useAuthStore } from '../stores/auth'
 
 const TABLES = ['articles', 'words', 'word_marks', 'context_translations']
 
+// 模块级并发锁：同步进行中再次调用 syncNow 时复用同一 Promise（合并为一次同步），
+// 避免手动同步与自动同步并发导致重复推送/插入。
+let inflightSync = null
+
 // 表格中文名（同步结果提示用）
 const TABLE_LABELS = { articles: '文章', words: '单词', word_marks: '标记', context_translations: '翻译' }
 
@@ -92,7 +96,15 @@ async function batchInsert(supabase, table, payloads) {
  * 级联：文章被删后，其云端单词/标记/翻译一并软删（孤儿清理）。
  * 已知取舍：删除文章后另一台设备再修改其中单词，该更新随级联一起丢弃。
  */
-export async function syncNow() {
+export async function syncNow(...args) {
+  if (inflightSync) return inflightSync
+  inflightSync = doSync(...args).finally(() => {
+    inflightSync = null
+  })
+  return inflightSync
+}
+
+async function doSync() {
   const supabase = getSupabase()
   const username = requireUsername()
   const startedAt = Date.now()

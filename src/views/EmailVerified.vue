@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { handleEmailConfirmation, readableError } from '../services/auth'
@@ -11,6 +11,16 @@ const router = useRouter()
 const status = ref('loading') // loading | success | error
 const message = ref('')
 
+// 兜底跳转定时器句柄，卸载时需清理
+let redirectTimer = null
+
+onUnmounted(() => {
+  if (redirectTimer) {
+    clearTimeout(redirectTimer)
+    redirectTimer = null
+  }
+})
+
 onMounted(async () => {
   // 等待 Supabase 客户端从 URL 中捕获并完成会话处理
   await new Promise((r) => setTimeout(r, 300))
@@ -21,7 +31,7 @@ onMounted(async () => {
       await auth.restoreSession()
       status.value = 'success'
       message.value = '邮箱验证成功，正在进入...'
-      setTimeout(() => router.replace('/'), 1200)
+      redirectTimer = setTimeout(() => router.replace('/'), 1200)
     } else {
       // 未捕获到 session：可能是验证链接已过期/重复点击，或令牌异常
       status.value = 'error'

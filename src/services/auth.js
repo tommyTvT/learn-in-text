@@ -13,6 +13,7 @@ export function readableError(error) {
   if (msg.includes('user already registered') || msg.includes('already registered')) return '该邮箱已被注册'
   if (msg.includes('email not confirmed')) return '邮箱尚未确认，请先完成邮箱验证'
   if (msg.includes('rate limit') || msg.includes('too many requests')) return '操作过于频繁，请稍后再试'
+  if (msg.includes('username_already_taken')) return '该用户名已被占用'
   return error.message || '操作失败'
 }
 

@@ -79,7 +79,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const contextMaxTokens = ref(DEFAULT_CONTEXT_MAX_TOKENS)
   const articleMaxTokens = ref(DEFAULT_ARTICLE_MAX_TOKENS)
   const requestTimeout = ref(DEFAULT_REQUEST_TIMEOUT)
-  const username = ref('')
   const supabaseUrl = ref('')
   const supabaseAnonKey = ref('')
   const autoSync = ref(DEFAULT_AUTO_SYNC)
@@ -197,7 +196,6 @@ export const useSettingsStore = defineStore('settings', () => {
       contextMaxTokens.value = toPositiveNumber(data.contextMaxTokens, DEFAULT_CONTEXT_MAX_TOKENS)
       articleMaxTokens.value = toPositiveNumber(data.articleMaxTokens, DEFAULT_ARTICLE_MAX_TOKENS)
       requestTimeout.value = toPositiveNumber(data.requestTimeout, DEFAULT_REQUEST_TIMEOUT)
-      username.value = data.username || ''
       // 内置云存储配置：未在本地保存过则使用 .env 中的内置值，用户无需手动输入
       supabaseUrl.value = data.supabaseUrl || BUILTIN_SUPABASE_URL
       supabaseAnonKey.value = data.supabaseAnonKey || BUILTIN_SUPABASE_ANON_KEY
@@ -224,7 +222,6 @@ export const useSettingsStore = defineStore('settings', () => {
         contextMaxTokens: contextMaxTokens.value,
         articleMaxTokens: articleMaxTokens.value,
         requestTimeout: requestTimeout.value,
-        username: username.value,
         supabaseUrl: supabaseUrl.value,
         supabaseAnonKey: supabaseAnonKey.value,
         autoSync: autoSync.value,
@@ -249,7 +246,6 @@ export const useSettingsStore = defineStore('settings', () => {
       contextMaxTokens: contextMaxTokens.value,
       articleMaxTokens: articleMaxTokens.value,
       requestTimeout: requestTimeout.value,
-      username: username.value,
       supabaseUrl: supabaseUrl.value,
       supabaseAnonKey: supabaseAnonKey.value,
       autoSync: autoSync.value,
@@ -270,7 +266,6 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.contextMaxTokens !== undefined) contextMaxTokens.value = toPositiveNumber(data.contextMaxTokens, DEFAULT_CONTEXT_MAX_TOKENS)
     if (data.articleMaxTokens !== undefined) articleMaxTokens.value = toPositiveNumber(data.articleMaxTokens, DEFAULT_ARTICLE_MAX_TOKENS)
     if (data.requestTimeout !== undefined) requestTimeout.value = toPositiveNumber(data.requestTimeout, DEFAULT_REQUEST_TIMEOUT)
-    if (data.username !== undefined) username.value = data.username
     if (data.supabaseUrl !== undefined) supabaseUrl.value = data.supabaseUrl
     if (data.supabaseAnonKey !== undefined) supabaseAnonKey.value = data.supabaseAnonKey
     if (data.autoSync !== undefined) autoSync.value = !!data.autoSync
@@ -362,7 +357,7 @@ export const useSettingsStore = defineStore('settings', () => {
   loadSettings()
   loadSyncTimes()
 
-  watch([providers, activeProviderId, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, username, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
+  watch([providers, activeProviderId, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
     if (silentApply) return
     saveSettings()
     scheduleUpload()
@@ -381,7 +376,6 @@ export const useSettingsStore = defineStore('settings', () => {
     contextMaxTokens,
     articleMaxTokens,
     requestTimeout,
-    username,
     supabaseUrl,
     supabaseAnonKey,
     autoSync,

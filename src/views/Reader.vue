@@ -72,7 +72,7 @@ async function loadArticleWords() {
 
 function buildOccKeyWordMap() {
   const map = new Map()
-  for (const paragraphParts of renderContent()) {
+  for (const paragraphParts of renderedParagraphs.value) {
     for (const part of paragraphParts) {
       if (part.type === 'word' && !map.has(part.occKey)) {
         const wordData = articleWords.value.find(w => w.word === part.word)
@@ -363,7 +363,7 @@ function getWordHighlightHover(part) {
   return 'hover:bg-gray-100 dark:hover:bg-neutral-800'
 }
 
-function renderContent() {
+const renderedParagraphs = computed(() => {
   if (!article.value) return []
   const paragraphs = parseArticle(article.value.content).paragraphs
   const parts = []
@@ -407,7 +407,7 @@ function renderContent() {
   }
 
   return parts
-}
+})
 </script>
 
 <template>
@@ -460,7 +460,7 @@ function renderContent() {
       </div>
 
       <div class="max-w-none leading-relaxed text-gray-800 dark:text-neutral-200">
-        <template v-for="(paragraphParts, paragraphIndex) in renderContent()" :key="paragraphIndex">
+        <template v-for="(paragraphParts, paragraphIndex) in renderedParagraphs" :key="paragraphIndex">
           <p class="mb-4 last:mb-0">
             <template v-for="(part, index) in paragraphParts" :key="index">
               <span v-if="part.type === 'text'">{{ part.content }}</span>

@@ -303,6 +303,7 @@ export const wordMarkService = {
   },
 
   async toggleMark(wordId, articleId, occKey) {
+    occKey = occKey || ''
     const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (existing) {
       await db.transaction('rw', db.wordMarks, db.tombstones, db.words, async () => {
@@ -317,6 +318,7 @@ export const wordMarkService = {
   },
 
   async add(wordId, articleId, occKey) {
+    occKey = occKey || ''
     const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (!existing) {
       await db.wordMarks.add({ wordId, articleId, occKey, createdAt: new Date(), updatedAt: new Date() })
@@ -324,6 +326,7 @@ export const wordMarkService = {
   },
 
   async remove(articleId, occKey) {
+    occKey = occKey || ''
     const existing = await db.wordMarks.where({ articleId, occKey }).first()
     if (existing) {
       await db.transaction('rw', db.wordMarks, db.tombstones, db.words, async () => {
@@ -370,11 +373,13 @@ export const wordMarkService = {
 }
 
 export const contextTranslationService = {
-  async get(wordId, articleId, occKey = '0') {
+  async get(wordId, articleId, occKey) {
+    occKey = occKey || '0'
     return await db.contextTranslations.where({ wordId, articleId, occKey }).first()
   },
 
-  async set(wordId, articleId, occKey = '0', translation) {
+  async set(wordId, articleId, occKey, translation) {
+    occKey = occKey || '0'
     const existing = await db.contextTranslations.where({ wordId, articleId, occKey }).first()
     if (!translation) {
       if (existing) {
