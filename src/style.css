@@ -4,6 +4,9 @@
 
 :root {
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* 根字号默认 100%，由用户在设置页调整后通过 inline style 覆盖。
+     所有基于 rem 的 Tailwind text-* 工具类会同步等比缩放。 */
+  font-size: 100%;
   line-height: 1.5;
   font-weight: 400;
   color-synthesis: none;

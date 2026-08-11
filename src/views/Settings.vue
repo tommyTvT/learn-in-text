@@ -258,6 +258,51 @@ onMounted(() => {
             {{ label }}
           </button>
         </div>
+
+        <!-- 字体大小 -->
+        <div class="mt-5 pt-5 border-t border-gray-200 dark:border-neutral-800">
+          <div class="flex items-center justify-between gap-3 mb-2">
+            <div>
+              <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">字体大小</h3>
+              <p class="text-xs text-gray-500 dark:text-neutral-400 mt-0.5">
+                整体缩放界面文字
+              </p>
+            </div>
+            <button
+              type="button"
+              @click="settingsStore.fontSize = 100"
+              class="shrink-0 px-2.5 py-1 text-xs text-gray-600 dark:text-neutral-400 border border-gray-300 dark:border-neutral-700 rounded-md hover:bg-gray-50 dark:hover:bg-neutral-700 transition-colors"
+            >
+              重置
+            </button>
+          </div>
+          <div class="flex items-center gap-3">
+            <input
+              type="range"
+              min="60"
+              max="200"
+              step="1"
+              v-model.number="settingsStore.fontSize"
+              class="flex-1 accent-blue-600 cursor-pointer"
+            />
+            <div class="flex items-center gap-1 shrink-0">
+              <input
+                type="number"
+                min="60"
+                max="200"
+                step="1"
+                v-model.number="settingsStore.fontSize"
+                class="w-16 px-2 py-1 text-sm text-center border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <span class="text-xs text-gray-500 dark:text-neutral-400">%</span>
+            </div>
+          </div>
+          <div class="flex justify-between text-xs text-gray-400 dark:text-neutral-500 mt-1">
+            <span>60%</span>
+            <span>100%</span>
+            <span>200%</span>
+          </div>
+        </div>
       </div>
 
       <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">

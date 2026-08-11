@@ -3,12 +3,16 @@ import { RouterView, useRouter, useRoute } from 'vue-router'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useWordStore } from './stores/word'
 import { useAuthStore } from './stores/auth'
+import { useSettingsStore } from './stores/settings'
 import AppHeader from './components/Common/AppHeader.vue'
 import MobileTabBar from './components/Common/MobileTabBar.vue'
 import { startAutoSync, stopAutoSync, requestSync } from './services/autoSync'
 
 const wordStore = useWordStore()
 const auth = useAuthStore()
+// 同步实例化 settings store：其 loadSettings 内部会立即 applyTheme / applyFontSize，
+// 让字号与主题在 App 挂载前就写入 document.documentElement，避免首屏闪烁
+const settingsStore = useSettingsStore()
 const router = useRouter()
 const route = useRoute()
 
@@ -109,7 +113,7 @@ onUnmounted(() => {
     <AppHeader v-if="!isBare" />
     <main
       :class="[
-        'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8',
+        'mx-auto px-4 sm:px-6 lg:px-8 py-8 w-[min(95vw,1600px)]',
         hideMobileTab ? 'pb-8' : 'pb-24 md:pb-8'
       ]"
     >

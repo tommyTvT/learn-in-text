@@ -27,6 +27,10 @@ const DEFAULT_CONTEXT_MAX_TOKENS = 200
 const DEFAULT_ARTICLE_MAX_TOKENS = 2000
 const DEFAULT_REQUEST_TIMEOUT = 30
 const DEFAULT_AUTO_SYNC = true
+// 字体大小（百分比）：100% = 浏览器默认根字号，由用户在设置页调整
+const DEFAULT_FONT_SIZE = 100
+const FONT_SIZE_MIN = 60
+const FONT_SIZE_MAX = 200
 
 function toPositiveNumber(value, fallback) {
   const num = Number(value)
@@ -83,6 +87,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const supabaseAnonKey = ref('')
   const autoSync = ref(DEFAULT_AUTO_SYNC)
   const debugMode = ref(false)
+  const fontSize = ref(DEFAULT_FONT_SIZE)
 
   // ---- 设置同步（LWW）状态 ----
   // 本地最后修改时间戳；应用云端设置时不计入「本地修改」，避免触发回传循环
@@ -138,6 +143,12 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  function applyFontSize() {
+    const v = toPositiveNumber(fontSize.value, DEFAULT_FONT_SIZE)
+    const clamped = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, v))
+    document.documentElement.style.fontSize = clamped + '%'
+  }
+
   function toggleTheme() {
     theme.value = isDark.value ? 'light' : 'dark'
     applyTheme()
@@ -191,6 +202,7 @@ export const useSettingsStore = defineStore('settings', () => {
       if (THEMES.includes(data.theme)) {
         theme.value = data.theme
       }
+      fontSize.value = toPositiveNumber(data.fontSize, DEFAULT_FONT_SIZE)
       maxConcurrency.value = toPositiveNumber(data.maxConcurrency, DEFAULT_MAX_CONCURRENCY)
       basicInfoMaxTokens.value = toPositiveNumber(data.basicInfoMaxTokens, DEFAULT_BASIC_INFO_MAX_TOKENS)
       contextMaxTokens.value = toPositiveNumber(data.contextMaxTokens, DEFAULT_CONTEXT_MAX_TOKENS)
@@ -209,6 +221,7 @@ export const useSettingsStore = defineStore('settings', () => {
       }
     }
     applyTheme()
+    applyFontSize()
   }
 
   function saveSettings() {
@@ -225,7 +238,8 @@ export const useSettingsStore = defineStore('settings', () => {
         supabaseUrl: supabaseUrl.value,
         supabaseAnonKey: supabaseAnonKey.value,
         autoSync: autoSync.value,
-        debugMode: debugMode.value
+        debugMode: debugMode.value,
+        fontSize: fontSize.value
       }))
     } catch (e) {
       console.error('保存设置失败:', e)
@@ -249,7 +263,8 @@ export const useSettingsStore = defineStore('settings', () => {
       supabaseUrl: supabaseUrl.value,
       supabaseAnonKey: supabaseAnonKey.value,
       autoSync: autoSync.value,
-      debugMode: debugMode.value
+      debugMode: debugMode.value,
+      fontSize: fontSize.value
     }
   }
 
@@ -270,7 +285,9 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.supabaseAnonKey !== undefined) supabaseAnonKey.value = data.supabaseAnonKey
     if (data.autoSync !== undefined) autoSync.value = !!data.autoSync
     if (data.debugMode !== undefined) debugMode.value = !!data.debugMode
+    if (data.fontSize !== undefined) fontSize.value = toPositiveNumber(data.fontSize, DEFAULT_FONT_SIZE)
     applyTheme()
+    applyFontSize()
     saveSettings()
     // 从备份导入设置视为本地修改，触发云端回传；应用云端设置时跳过
     if (!silentApply) scheduleUpload()
@@ -357,8 +374,9 @@ export const useSettingsStore = defineStore('settings', () => {
   loadSettings()
   loadSyncTimes()
 
-  watch([providers, activeProviderId, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
+  watch([providers, activeProviderId, theme, fontSize, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
     if (silentApply) return
+    applyFontSize()
     saveSettings()
     scheduleUpload()
   }, { deep: true })
@@ -380,6 +398,7 @@ export const useSettingsStore = defineStore('settings', () => {
     supabaseAnonKey,
     autoSync,
     debugMode,
+    fontSize,
     isDark,
     setActiveProvider,
     addCustomProvider,
@@ -389,6 +408,7 @@ export const useSettingsStore = defineStore('settings', () => {
     isConfigured,
     toggleTheme,
     applyTheme,
+    applyFontSize,
     exportSettings,
     importSettings,
     syncFromCloud,
