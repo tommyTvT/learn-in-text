@@ -13,8 +13,15 @@ const selectedWords = ref([])
 const expandedArticles = ref(new Set())
 
 onMounted(async () => {
-  await articleStore.fetchArticles()
-  await wordStore.fetchMarkedWords()
+  // App 启动时已通过 wordStore.fetchMarkedWords() 完成一次全量加载，
+  // 复用缓存避免每次进入词库重复读全量数据（数据变更时会自动失效重新加载）
+  if (!wordStore.loaded) {
+    await wordStore.fetchMarkedWords()
+  }
+  // 文章列表通常已在首页加载过；为空时才补充加载，避免重复读库
+  if (articleStore.articles.length === 0) {
+    await articleStore.fetchArticles()
+  }
 })
 
 const allArticles = computed(() => articleStore.articles)

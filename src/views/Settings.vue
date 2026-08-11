@@ -1,12 +1,13 @@
 ﻿<script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useSettingsStore } from '../stores/settings'
 import { useAuthStore } from '../stores/auth'
-import { testConnection, fetchModels } from '../services/ai'
+import { testConnection } from '../services/ai'
 import { exportService } from '../services/db'
 import { testConnection as testCloudConnection, syncNow, clearCloud } from '../services/sync'
 import { lastSyncState, setLastSyncState } from '../services/autoSync'
+import AIConfigModal from '../components/AI/AIConfigModal.vue'
 
 const settingsStore = useSettingsStore()
 const authStore = useAuthStore()
@@ -14,93 +15,7 @@ const authStore = useAuthStore()
 const isLoggedIn = computed(() => authStore.isLoggedIn)
 
 const activeProvider = computed(() => settingsStore.activeProvider)
-const showApiKey = ref(false)
-const apiKeyFocused = ref(false)
-const apiKeyShown = computed(() =>
-  apiKeyFocused.value || showApiKey.value || !activeProvider.value?.apiKey
-    ? (activeProvider.value?.apiKey || '')
-    : '••••••••'
-)
-function onApiKeyInput(e) {
-  if (activeProvider.value) {
-    activeProvider.value.apiKey = e.target.value
-  }
-}
-function handleAddProvider() {
-  settingsStore.addCustomProvider()
-}
-function handleRemoveProvider(id) {
-  const provider = settingsStore.providers.find(p => p.id === id)
-  if (!confirm(`确定删除供应商「${provider?.name}」吗？其 API Key 配置将一并删除。`)) return
-  settingsStore.removeProvider(id)
-}
-
-// 模型列表自动获取
-const modelList = ref([])
-const modelsLoading = ref(false)
-const modelsError = ref('')
-const modelDropdownOpen = ref(false)
-const modelFilter = ref('')
-
-const filteredModels = computed(() => {
-  const keyword = modelFilter.value.trim().toLowerCase()
-  if (!keyword) return modelList.value
-  return modelList.value.filter(m => m.toLowerCase().includes(keyword))
-})
-
-async function handleFetchModels() {
-  modelsLoading.value = true
-  modelsError.value = ''
-  modelList.value = []
-  try {
-    modelList.value = await fetchModels()
-    if (!modelList.value.length) {
-      modelsError.value = '该接口未返回可用模型列表，请手动填写模型名称'
-    } else {
-      modelFilter.value = ''
-      modelDropdownOpen.value = true
-    }
-  } catch (error) {
-    modelsError.value = '获取失败：' + error.message
-  } finally {
-    modelsLoading.value = false
-  }
-}
-
-function onModelInput() {
-  modelFilter.value = activeProvider.value?.model || ''
-  if (modelList.value.length) {
-    modelDropdownOpen.value = true
-  }
-}
-
-function openModelDropdown() {
-  if (!modelList.value.length) return
-  modelFilter.value = ''
-  modelDropdownOpen.value = true
-}
-
-function selectModel(model) {
-  if (activeProvider.value) {
-    activeProvider.value.model = model
-  }
-  modelDropdownOpen.value = false
-}
-
-function closeModelDropdown() {
-  // 延迟关闭，让下拉项的点击事件先触发
-  setTimeout(() => {
-    modelDropdownOpen.value = false
-  }, 150)
-}
-
-watch(() => settingsStore.activeProviderId, () => {
-  modelList.value = []
-  modelsError.value = ''
-  modelDropdownOpen.value = false
-  modelFilter.value = ''
-  testResult.value = null
-})
+const aiConfigOpen = ref(false)
 const testing = ref(false)
 const testResult = ref(null)
 const exporting = ref(false)
@@ -203,11 +118,6 @@ async function handleTestConnection() {
   } finally {
     testing.value = false
   }
-}
-
-function saveAndClose() {
-  settingsStore.saveSettings()
-  alert('设置已保存')
 }
 
 async function exportAllData() {
@@ -351,187 +261,51 @@ onMounted(() => {
       </div>
 
       <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
-        <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">AI 接口配置</h2>
-        <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
-          支持配置多个供应商并随时切换。预设 DeepSeek 只需填写 API Key；也可以添加自定义 OpenAI 兼容接口（如阿里百炼、OpenAI 等）。
-        </p>
+        <div class="flex items-center justify-between gap-3 mb-4">
+          <div>
+            <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100">AI 接口配置</h2>
+            <p class="text-sm text-gray-600 dark:text-neutral-400 mt-1">
+              支持多个供应商随时切换。配置供应商与模型在弹窗内完成。
+            </p>
+          </div>
+          <button
+            @click="aiConfigOpen = true"
+            class="shrink-0 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
+          >
+            配置
+          </button>
+        </div>
 
         <div class="space-y-4">
-          <!-- 供应商列表 -->
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div
-              v-for="provider in settingsStore.providers"
-              :key="provider.id"
-              @click="settingsStore.setActiveProvider(provider.id)"
-              :class="[
-                'relative cursor-pointer rounded-lg border p-3 transition-colors',
-                settingsStore.activeProviderId === provider.id
-                  ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200 dark:border-neutral-400 dark:bg-neutral-800 dark:ring-neutral-600'
-                  : 'border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 hover:bg-gray-50 dark:hover:bg-neutral-800'
-              ]"
-            >
-              <div class="flex items-center justify-between gap-2">
-                <span class="font-medium text-gray-900 dark:text-neutral-100 truncate">{{ provider.name }}</span>
-                <span
-                  :class="[
-                    'shrink-0 text-xs px-2 py-0.5 rounded-full',
-                    provider.apiKey
-                      ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
-                      : 'bg-gray-100 text-gray-500 dark:bg-neutral-700 dark:text-neutral-400'
-                  ]"
-                >
-                  {{ provider.apiKey ? '已配置' : '未配置 Key' }}
-                </span>
-              </div>
-              <div class="text-xs text-gray-500 dark:text-neutral-400 mt-1 truncate">
-                {{ provider.preset ? '预设 · ' : '' }}{{ provider.model || '未设置模型' }}
-              </div>
-            </div>
-
-            <button
-              @click="handleAddProvider"
-              class="rounded-lg border-2 border-dashed border-gray-300 dark:border-neutral-700 p-3 text-sm text-gray-500 dark:text-neutral-400 hover:border-blue-400 hover:text-blue-600 dark:hover:border-neutral-500 dark:hover:text-neutral-200 transition-colors"
-            >
-              + 添加自定义供应商
-            </button>
-          </div>
-
-          <!-- 当前供应商配置 -->
-          <div v-if="activeProvider" class="border-t border-gray-200 dark:border-neutral-800 pt-4 space-y-4">
-            <div v-if="activeProvider.preset" class="bg-gray-50 dark:bg-neutral-800 rounded-md p-3 text-sm text-gray-600 dark:text-neutral-400">
-              接口地址：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ activeProvider.endpoint }}</span>
-            </div>
-
-            <template v-if="!activeProvider.preset">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">供应商名称</label>
-                <input
-                  v-model="activeProvider.name"
-                  type="text"
-                  placeholder="例如：我的 OpenAI"
-                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-                />
-              </div>
-
-              <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">API 端点</label>
-                <input
-                  v-model="activeProvider.endpoint"
-                  type="text"
-                  placeholder="https://api.openai.com/v1"
-                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-                />
-                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                  OpenAI兼容接口地址，例如：https://api.openai.com/v1
-                </p>
-              </div>
-            </template>
-
-            <div>
-              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">API Key</label>
-              <!-- 不使用密码输入框：部分手机的安全输入法无法粘贴，改用 text 输入框 + 隐藏时用点号遮挡 -->
-              <div class="relative">
-                <input
-                  :value="apiKeyShown"
-                  @input="onApiKeyInput"
-                  @focus="apiKeyFocused = true"
-                  @blur="apiKeyFocused = false"
-                  type="text"
-                  placeholder="sk-..."
-                  class="w-full px-3 py-2 pr-12 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-                />
-                <button
-                  @click="showApiKey = !showApiKey"
-                  class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-sm text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-200"
-                >
-                  {{ showApiKey ? '隐藏' : '显示' }}
-                </button>
-              </div>
-              <p v-if="activeProvider.preset" class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                预设供应商只需填写 API Key，接口地址已自动配置，模型可使用默认值或自行修改
-              </p>
-            </div>
-
-            <div>
-              <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">模型</label>
-              <div class="flex gap-2">
-                <div class="relative flex-1">
-                  <input
-                    v-model="activeProvider.model"
-                    @input="onModelInput"
-                    @focus="openModelDropdown"
-                    @blur="closeModelDropdown"
-                    @keydown.esc="modelDropdownOpen = false"
-                    type="text"
-                    placeholder="gpt-3.5-turbo"
-                    class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
-                  />
-                  <button
-                    v-if="modelList.length"
-                    @mousedown.prevent="modelDropdownOpen = !modelDropdownOpen"
-                    type="button"
-                    class="absolute right-2 top-1/2 -translate-y-1/2 px-1 text-gray-400 dark:text-neutral-500 hover:text-gray-600 dark:hover:text-neutral-300"
+          <!-- 当前激活供应商概览 -->
+          <div
+            class="rounded-lg border border-gray-200 dark:border-neutral-800 bg-gray-50 dark:bg-neutral-800/60 p-4"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="text-xs text-gray-500 dark:text-neutral-400 mb-1">当前使用的供应商</div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-medium text-gray-900 dark:text-neutral-100">
+                    {{ activeProvider?.name || '未选择' }}
+                  </span>
+                  <span
+                    :class="[
+                      'shrink-0 text-xs px-2 py-0.5 rounded-full',
+                      activeProvider?.apiKey
+                        ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
+                        : 'bg-gray-100 text-gray-500 dark:bg-neutral-700 dark:text-neutral-400'
+                    ]"
                   >
-                    <svg
-                      :class="['w-4 h-4 transition-transform', modelDropdownOpen ? 'rotate-180' : '']"
-                      fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                    >
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
-
-                  <!-- 自定义模型下拉面板 -->
-                  <div
-                    v-if="modelDropdownOpen && modelList.length"
-                    class="absolute z-20 left-0 right-0 mt-1 max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-lg"
-                  >
-                    <div class="sticky top-0 px-3 py-1.5 text-xs text-gray-400 dark:text-neutral-500 bg-gray-50 dark:bg-neutral-800 border-b border-gray-100 dark:border-neutral-700">
-                      共 {{ filteredModels.length }} 个模型{{ modelFilter ? '（已过滤）' : '' }}
-                    </div>
-                    <button
-                      v-for="m in filteredModels"
-                      :key="m"
-                      @mousedown.prevent="selectModel(m)"
-                      type="button"
-                      :class="[
-                        'block w-full text-left px-3 py-2 text-sm truncate transition-colors',
-                        m === activeProvider.model
-                          ? 'bg-blue-50 text-blue-700 font-medium dark:bg-neutral-700 dark:text-blue-400'
-                          : 'text-gray-700 dark:text-neutral-300 hover:bg-gray-100 dark:hover:bg-neutral-700'
-                      ]"
-                    >
-                      {{ m }}
-                    </button>
-                    <div
-                      v-if="!filteredModels.length"
-                      class="px-3 py-3 text-sm text-gray-400 dark:text-neutral-500 text-center"
-                    >
-                      没有匹配「{{ modelFilter }}」的模型
-                    </div>
-                  </div>
+                    {{ activeProvider?.apiKey ? '已配置' : '未配置 Key' }}
+                  </span>
                 </div>
-                <button
-                  @click="handleFetchModels"
-                  :disabled="modelsLoading || !activeProvider.endpoint || !activeProvider.apiKey"
-                  class="shrink-0 px-3 py-2 text-sm bg-gray-100 dark:bg-neutral-700 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {{ modelsLoading ? '获取中...' : '获取模型列表' }}
-                </button>
               </div>
-              <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                可手动填写，或点击「获取模型列表」从接口拉取可用模型后从下拉中选择
-                <span v-if="modelList.length">（已获取 {{ modelList.length }} 个模型）</span>
-              </p>
-              <p v-if="modelsError" class="text-xs text-red-600 dark:text-red-400 mt-1">{{ modelsError }}</p>
-            </div>
-
-            <div v-if="!activeProvider.preset" class="flex justify-end">
-              <button
-                @click="handleRemoveProvider(activeProvider.id)"
-                class="px-3 py-1.5 text-sm text-red-600 dark:text-red-400 border border-red-300 dark:border-red-800 rounded-md hover:bg-red-50 dark:hover:bg-red-900/20"
-              >
-                删除此供应商
-              </button>
+              <div class="text-right shrink-0">
+                <div class="text-xs text-gray-500 dark:text-neutral-400 mb-1">当前模型</div>
+                <div class="text-sm font-medium text-gray-900 dark:text-neutral-100 max-w-[10rem] sm:max-w-xs truncate">
+                  {{ activeProvider?.model || '未设置模型' }}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -539,16 +313,13 @@ onMounted(() => {
             <button
               @click="handleTestConnection"
               :disabled="testing || !settingsStore.aiEndpoint || !settingsStore.aiApiKey"
-              class="px-4 py-2 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              class="px-4 py-2 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {{ testing ? '测试中...' : '测试连接' }}
             </button>
-            <button
-              @click="saveAndClose"
-              class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-            >
-              保存设置
-            </button>
+            <span class="text-xs text-gray-400 dark:text-neutral-500">
+              测试当前所选供应商与模型的连接
+            </span>
           </div>
 
           <div
@@ -828,5 +599,8 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- AI 配置弹窗 -->
+    <AIConfigModal :open="aiConfigOpen" @close="aiConfigOpen = false" />
   </div>
 </template>

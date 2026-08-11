@@ -1,8 +1,5 @@
 <script setup>
 import { RouterLink } from 'vue-router'
-import { useWordStore } from '../../stores/word'
-
-const wordStore = useWordStore()
 
 const tabItems = [
   {
@@ -13,7 +10,6 @@ const tabItems = [
   {
     to: '/vocabulary',
     label: '词库',
-    badge: true,
     paths: ['M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253'],
   },
   {
@@ -32,31 +28,25 @@ const tabItems = [
   <nav
     class="md:hidden fixed bottom-0 inset-x-0 z-40 bg-white dark:bg-neutral-900 border-t border-gray-200 dark:border-neutral-800 pb-[env(safe-area-inset-bottom)]"
   >
-    <div class="flex h-14">
+    <div class="flex h-14 px-2 gap-1">
       <RouterLink
         v-for="item in tabItems"
         :key="item.to"
         :to="item.to"
-        class="flex-1 flex flex-col items-center justify-center gap-0.5 text-xs font-medium text-gray-500 dark:text-neutral-400"
-        active-class="text-blue-600 dark:text-blue-400"
+        class="flex-1 flex flex-col items-center justify-center gap-0.5 text-xs font-medium rounded-xl transition-colors text-gray-500 dark:text-neutral-400"
+        active-class="text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-500/10"
       >
         <span class="relative">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path
-              v-for="(d, i) in item.paths"
-              :key="i"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              :d="d"
-            />
-          </svg>
-          <span
-            v-if="item.badge && wordStore.markedCount > 0"
-            class="absolute -top-1.5 -right-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 dark:bg-neutral-800 text-blue-800 dark:text-neutral-300"
-          >
-            {{ wordStore.markedCount > 99 ? '99+' : wordStore.markedCount }}
-          </span>
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            v-for="(d, i) in item.paths"
+            :key="i"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            :d="d"
+          />
+        </svg>
         </span>
         {{ item.label }}
       </RouterLink>

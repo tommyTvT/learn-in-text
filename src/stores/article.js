@@ -44,6 +44,18 @@ export const useArticleStore = defineStore('article', () => {
     return article
   }
 
+  /**
+   * 拖拽排序：把文章从 fromIndex 移动到 toIndex，并持久化整体顺序。
+   */
+  async function moveArticle(fromIndex, toIndex) {
+    const list = articles.value.slice()
+    const [moved] = list.splice(fromIndex, 1)
+    list.splice(toIndex, 0, moved)
+    list.forEach((a, i) => { a.sortOrder = i })
+    articles.value = list
+    await articleService.updateSortOrders(list.map(a => a.id))
+  }
+
   async function deleteArticle(id) {
     await articleService.delete(id)
     articles.value = articles.value.filter(a => a.id !== id)
@@ -60,6 +72,7 @@ export const useArticleStore = defineStore('article', () => {
     fetchArticle,
     createArticle,
     updateArticle,
+    moveArticle,
     deleteArticle
   }
 })

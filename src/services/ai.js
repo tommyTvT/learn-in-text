@@ -271,7 +271,7 @@ export async function generateArticle(words, options = {}) {
   return response.choices[0].message.content
 }
 
-export async function generateArticleTitle(content, options = {}) {
+export async function generateArticleMeta(content, options = {}) {
   const model = getModel()
 
   const {
@@ -292,17 +292,29 @@ export async function generateArticleTitle(content, options = {}) {
     messages: [
       {
         role: 'system',
-        content: '你是英语写作标题助手。请根据文章内容生成一个简洁的英文标题。标题要求：5-12个单词，切题、吸引人，不要使用引号、句号，不要包含换行。只返回标题本身。'
+        content: `你是英语写作助手。请根据文章内容生成英文标题与中文描述，返回JSON格式：
+{
+  "title": "英文标题",
+  "description": "中文描述"
+}
+要求：
+1. title：5-12个单词，切题、吸引人，不要使用引号、句号，不要包含换行
+2. description：必须使用中文，一句话概括文章大致内容（30-60字），供学习者快速了解文章`
       },
       {
         role: 'user',
-        content: `这是一篇${styleDesc}，请根据以下内容生成一个合适的英文标题：\n\n${content.slice(0, 3000)}`
+        content: `这是一篇${styleDesc}，请根据以下内容生成英文标题与中文描述：\n\n${content.slice(0, 3000)}`
       }
     ],
-    max_tokens: 50
+    response_format: { type: 'json_object' },
+    max_tokens: 150
   }))
 
-  return response.choices[0].message.content.trim()
+  const parsed = JSON.parse(response.choices[0].message.content)
+  return {
+    title: (parsed.title || '').trim(),
+    description: (parsed.description || '').trim()
+  }
 }
 
 export async function fetchModels() {

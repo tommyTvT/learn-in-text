@@ -1,15 +1,54 @@
 ﻿<script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, onBeforeUnmount, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import Sortable from 'sortablejs'
+import { GripVertical } from 'lucide-vue-next'
 import { useArticleStore } from '../stores/article'
 import { useWordStore } from '../stores/word'
+import EditArticleModal from '../components/Article/EditArticleModal.vue'
 
 const router = useRouter()
 const articleStore = useArticleStore()
 const wordStore = useWordStore()
 
-onMounted(() => {
-  articleStore.fetchArticles()
+const listRef = ref(null)
+let sortable = null
+
+function setupSortable() {
+  if (sortable || !listRef.value) return
+  sortable = new Sortable(listRef.value, {
+    animation: 150,
+    handle: '.drag-handle',
+    ghostClass: 'article-drag-ghost',
+    // 移动端按住手柄稍候才启动拖拽，避免与列表滚动冲突
+    delayOnTouchOnly: true,
+    delay: 150,
+    onEnd(evt) {
+      if (evt.oldIndex == null || evt.newIndex == null || evt.oldIndex === evt.newIndex) return
+      articleStore.moveArticle(evt.oldIndex, evt.newIndex)
+    }
+  })
+}
+
+onMounted(async () => {
+  await articleStore.fetchArticles()
+  await nextTick()
+  setupSortable()
+})
+
+// 文章从 0 变为有（或删光后重新新增）时列表容器会重新挂载，需要重建拖拽实例
+watch(() => articleStore.articles.length, async () => {
+  await nextTick()
+  if (sortable && sortable.el !== listRef.value) {
+    sortable.destroy()
+    sortable = null
+  }
+  setupSortable()
+})
+
+onBeforeUnmount(() => {
+  sortable?.destroy()
+  sortable = null
 })
 
 function openArticle(id) {
@@ -32,30 +71,11 @@ async function exportArticle(articleId, title, event) {
   }
 }
 
-const editingId = ref(null)
-const editingTitle = ref('')
+const editingArticle = ref(null)
 
-function startEditTitle(article, event) {
+function startEdit(article, event) {
   event.stopPropagation()
-  editingId.value = article.id
-  editingTitle.value = article.title
-}
-
-async function saveTitle(article) {
-  const title = editingTitle.value.trim()
-  if (!title) {
-    alert('标题不能为空')
-    return
-  }
-  await articleStore.updateArticle(article.id, { title })
-  editingId.value = null
-  editingTitle.value = ''
-}
-
-function cancelEditTitle(event) {
-  event.stopPropagation()
-  editingId.value = null
-  editingTitle.value = ''
+  editingArticle.value = article
 }
 
 function formatDate(date) {
@@ -106,7 +126,7 @@ function formatDate(date) {
       <div v-else-if="articleStore.articles.length === 0" class="text-center py-8 text-gray-500 dark:text-neutral-400">
         还没有文章，点击右上角新建或 AI 生成
       </div>
-      <div v-else class="space-y-3">
+      <div v-else ref="listRef" class="space-y-3">
         <div
           v-for="article in articleStore.articles"
           :key="article.id"
@@ -114,50 +134,25 @@ function formatDate(date) {
           class="p-4 border border-gray-200 dark:border-neutral-800 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors"
         >
           <div class="flex justify-between items-start">
+            <div
+              class="drag-handle shrink-0 self-center -ml-1 mr-2 p-1 text-gray-300 hover:text-gray-400 dark:text-neutral-600 dark:hover:text-neutral-500 cursor-grab active:cursor-grabbing touch-none"
+              title="拖动调整顺序"
+              @click.stop
+            >
+              <GripVertical class="w-4 h-4" />
+            </div>
             <div class="flex-1 min-w-0">
-              <template v-if="editingId === article.id">
-                <div class="flex items-center gap-2">
-                  <input
-                    v-model="editingTitle"
-                    type="text"
-                    @click.stop
-                    @keyup.enter="saveTitle(article)"
-                    @keyup.esc="cancelEditTitle"
-                    class="w-full px-2 py-1 text-sm border border-blue-400 dark:border-blue-500 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    autofocus
-                  />
-                  <button
-                    @click.stop="saveTitle(article)"
-                    class="shrink-0 text-green-600 hover:text-green-700"
-                    title="保存"
-                  >
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                    </svg>
-                  </button>
-                  <button
-                    @click.stop="cancelEditTitle"
-                    class="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-neutral-300"
-                    title="取消"
-                  >
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              </template>
-              <template v-else>
-                <h3 class="text-sm font-medium text-gray-900 dark:text-neutral-100 truncate">{{ article.title }}</h3>
-              </template>
+              <h3 class="text-sm font-medium text-gray-900 dark:text-neutral-100 truncate">{{ article.title }}</h3>
+              <p v-if="article.description" class="text-xs text-gray-600 dark:text-neutral-400 mt-0.5 truncate">{{ article.description }}</p>
               <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
                 {{ formatDate(article.createdAt) }}
               </p>
             </div>
             <div class="flex items-center gap-1 ml-2">
               <button
-                @click="startEditTitle(article, $event)"
+                @click="startEdit(article, $event)"
                 class="text-gray-400 hover:text-blue-500"
-                title="编辑标题"
+                title="编辑文章"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -185,5 +180,17 @@ function formatDate(date) {
         </div>
       </div>
     </div>
+
+    <EditArticleModal
+      v-if="editingArticle"
+      :article="editingArticle"
+      @close="editingArticle = null"
+    />
   </div>
 </template>
+
+<style scoped>
+.article-drag-ghost {
+  opacity: 0.4;
+}
+</style>

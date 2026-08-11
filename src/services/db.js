@@ -33,8 +33,20 @@ async function ensureSchema() {
 await ensureSchema()
 
 /**
+ * 生成全局唯一 id（文章业务键）。
+ * crypto.randomUUID 需安全上下文（https/localhost），http 场景降级为随机串。
+ */
+export function newUid() {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID()
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0
+    return (ch === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+  })
+}
+
+/**
  * 稳定业务键（本地视角）：同步时云端记录经会话内 id 映射后也用同一规则拼键。
- * - articles: title
+ * - articles: uid（带 "u:" 前缀；无 uid 返回空串，不记 tombstone）
  * - words: word|本地articleId
  * - word_marks / context_translations: word|本地articleId|occKey
  * mark/translation 的 r 需带 word 字段（或 wordId 可查）。
@@ -42,7 +54,7 @@ await ensureSchema()
 export function tombstoneKey(table, r) {
   switch (table) {
     case 'articles':
-      return r.title || ''
+      return r.uid ? `u:${r.uid}` : ''
     case 'words':
       return `${r.word}|${r.articleId}`
     case 'word_marks':
@@ -68,7 +80,14 @@ async function recordTombstone(table, r) {
 
 export const articleService = {
   async getAll() {
-    return await db.articles.orderBy('updatedAt').reverse().toArray()
+    // 手动排序（sortOrder 升序）优先；无 sortOrder 的旧数据按更新时间倒序兜底
+    const list = await db.articles.toArray()
+    return list.sort((a, b) => {
+      const sa = a.sortOrder ?? Number.MAX_SAFE_INTEGER
+      const sb = b.sortOrder ?? Number.MAX_SAFE_INTEGER
+      if (sa !== sb) return sa - sb
+      return new Date(b.updatedAt) - new Date(a.updatedAt)
+    })
   },
 
   async getById(id) {
@@ -77,12 +96,31 @@ export const articleService = {
 
   async create(article) {
     const now = new Date()
+    // 新文章排到最前：取当前最小 sortOrder 再减一
+    const all = await db.articles.toArray()
+    const minOrder = all.reduce((m, a) => (a.sortOrder != null && a.sortOrder < m ? a.sortOrder : m), 0)
     const id = await db.articles.add({
       ...article,
+      uid: newUid(),
+      sortOrder: minOrder - 1,
       createdAt: now,
       updatedAt: now
     })
     return await db.articles.get(id)
+  },
+
+  /**
+   * 批量写入手动排序结果（sortOrder = 数组下标）。
+   * 同时刷新 updatedAt：云端同步以 updatedAt 做 LWW，
+   * 刷新后排序结果才能随同步覆盖到其他设备。
+   */
+  async updateSortOrders(orderedIds) {
+    const now = new Date()
+    await db.transaction('rw', db.articles, async () => {
+      await Promise.all(orderedIds.map((id, index) =>
+        db.articles.update(id, { sortOrder: index, updatedAt: now })
+      ))
+    })
   },
 
   async update(id, data) {
@@ -156,6 +194,60 @@ export const wordService = {
       }
     }
     return existing
+  },
+
+  /**
+   * 批量获取/创建一篇文章的单词（保持与 getOrCreate 相同的语义）：
+   * - 已有的直接复用；有 common 词义但缺 definitions 的补齐；
+   * - 不存在的批量写入（避免逐词 await 多次 IndexedDB 查询）。
+   * 返回顺序与入参（去重后）一致。
+   */
+  async getOrCreateMany(words, articleId) {
+    const lowerWords = [...new Set(words.map(w => w.toLowerCase()))]
+    if (lowerWords.length === 0) return []
+
+    const existing = await db.words.where('articleId').equals(articleId).toArray()
+    const existingMap = new Map(existing.map(w => [w.word, w]))
+    const result = []
+    const toAdd = []
+
+    for (const word of lowerWords) {
+      const found = existingMap.get(word)
+      if (found) {
+        // 与 getOrCreate 一致：已有记录但缺 common 词义时补齐
+        if (!found.definitions?.length) {
+          const commonDef = commonWordDefinitions[found.word]
+          if (commonDef) {
+            await db.words.update(found.id, {
+              definitions: [splitDefinition(commonDef.definition)],
+              source: 'common',
+              updatedAt: new Date()
+            })
+            found.definitions = [splitDefinition(commonDef.definition)]
+            found.source = 'common'
+          }
+        }
+        result.push(found)
+      } else {
+        const commonDef = commonWordDefinitions[word]
+        const record = {
+          word,
+          articleId,
+          definitions: commonDef ? [splitDefinition(commonDef.definition)] : [],
+          examples: [],
+          source: commonDef ? 'common' : '',
+          updatedAt: new Date()
+        }
+        toAdd.push(record)
+        result.push(record)
+      }
+    }
+
+    if (toAdd.length) {
+      const ids = await db.words.bulkAdd(toAdd)
+      toAdd.forEach((r, i) => { r.id = ids[i] })
+    }
+    return result
   },
 
   async update(id, data) {
@@ -325,6 +417,7 @@ export const exportService = {
       exportDate: new Date().toISOString(),
       article: {
         title: article.title,
+        description: article.description || '',
         content: article.content,
         createdAt: article.createdAt,
         updatedAt: article.updatedAt
@@ -344,9 +437,14 @@ export const exportService = {
     }
 
     const now = new Date()
+    const all = await db.articles.toArray()
+    const minOrder = all.reduce((m, a) => (a.sortOrder != null && a.sortOrder < m ? a.sortOrder : m), 0)
     const articleId = await db.articles.add({
       title: data.article.title,
+      description: data.article.description || '',
       content: data.article.content,
+      uid: newUid(), // 单篇导入总是生成新 uid，避免与已有文章撞身份
+      sortOrder: data.article.sortOrder ?? minOrder - 1,
       createdAt: data.article.createdAt || now,
       updatedAt: now
     })
@@ -425,18 +523,20 @@ export const exportService = {
 
     await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, async () => {
       const existingArticles = await db.articles.toArray()
-      const articleTitleMap = {}
-      existingArticles.forEach(a => { articleTitleMap[a.title] = a.id })
+      const articleUidMap = {}
+      existingArticles.forEach(a => { if (a.uid) articleUidMap[a.uid] = a.id })
 
       const articleIdMap = {}
       for (let i = 0; i < articles.length; i++) {
         const a = articles[i]
-        if (articleTitleMap[a.title]) {
-          articleIdMap[i] = articleTitleMap[a.title]
+        const existingId = a.uid && articleUidMap[a.uid]
+        if (existingId) {
+          articleIdMap[i] = existingId
           stats.skipped++
         } else {
           const id = await db.articles.add({
             ...a,
+            uid: a.uid || newUid(),
             createdAt: a.createdAt || new Date(),
             updatedAt: a.updatedAt || new Date()
           })

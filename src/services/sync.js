@@ -1,5 +1,5 @@
 import { getSupabase } from '../lib/supabase'
-import { db, tombstoneKey } from './db'
+import { db, tombstoneKey, newUid } from './db'
 import { useAuthStore } from '../stores/auth'
 
 const TABLES = ['articles', 'words', 'word_marks', 'context_translations']
@@ -154,52 +154,78 @@ export async function syncNow() {
   }
 
   // ==================== 3. 文章合并 ====================
+  // 文章业务键为 uid（创建时生成，全局唯一）：改标题只是普通字段更新，随 LWW 补丁同步。
   {
     const cloudArticleActive = new Set(cloud.articles.filter((c) => !c.deletedAt).map((c) => c.id))
 
-    const localArticleByKey = new Map()
-    for (const a of local.articles) {
-      const k = tombstoneKey('articles', a)
-      if (!localArticleByKey.has(k) || ts(a.updatedAt) > ts(localArticleByKey.get(k).updatedAt)) {
-        localArticleByKey.set(k, a)
+    // 双方记录一律补齐 uid：本地兜底早期记录；云端异常缺 uid 的生成后随更新回写
+    for (const l of local.articles) {
+      if (!l.uid) {
+        l.uid = newUid()
+        await db.articles.update(l.id, { uid: l.uid })
       }
     }
-    const cloudArticleByKey = new Map()
     for (const c of cloud.articles) {
-      const k = tombstoneKey('articles', c)
-      if (!cloudArticleByKey.has(k)) cloudArticleByKey.set(k, c)
+      if (!c.uid) {
+        c.uid = newUid()
+        cloudOps.articles.update.push({ id: c.id, patch: { uid: c.uid } })
+      }
     }
 
-    const allKeys = new Set([...localArticleByKey.keys(), ...cloudArticleByKey.keys()])
-    for (const key of allKeys) {
-      const l = localArticleByKey.get(key)
-      const c = cloudArticleByKey.get(key)
-      const tomb = tombByKey.get(`articles:${key}`)
+    const pullArticleToLocal = async (c) => {
+      const id = await db.articles.add({
+        uid: c.uid,
+        title: c.title,
+        description: c.description || '',
+        content: c.content,
+        sortOrder: c.sortOrder ?? null,
+        createdAt: c.createdAt || new Date(),
+        updatedAt: c.updatedAt || new Date()
+      })
+      c.__localArticleId = id
+      cloudIdOfLocalArticle.set(id, c.id)
+      bump('added', 'articles')
+    }
+
+    const localArticleByUid = new Map(local.articles.map((a) => [a.uid, a]))
+    const cloudArticleByUid = new Map()
+    for (const c of cloud.articles) {
+      if (!cloudArticleByUid.has(c.uid)) cloudArticleByUid.set(c.uid, c)
+    }
+
+    const allUids = new Set([...localArticleByUid.keys(), ...cloudArticleByUid.keys()])
+    for (const uid of allUids) {
+      const l = localArticleByUid.get(uid)
+      const c = cloudArticleByUid.get(uid)
+      const tomb = tombByKey.get(`articles:${tombstoneKey('articles', { uid })}`)
       const cActive = c ? cloudArticleActive.has(c.id) : false
 
       if (l && c && cActive) {
         if (tomb) tombToClear.push(tomb.id) // 本地已有记录 → 旧的删除标记不再需要
         if (ts(l.updatedAt) > ts(c.updatedAt)) {
-          cloudOps.articles.update.push({ id: c.id, patch: { content: l.content, updatedAt: l.updatedAt } })
+          cloudOps.articles.update.push({ id: c.id, patch: { title: l.title, description: l.description || '', content: l.content, sortOrder: l.sortOrder ?? null, updatedAt: l.updatedAt } })
           bump('updated', 'articles')
         } else if (ts(c.updatedAt) > ts(l.updatedAt)) {
-          await db.articles.update(l.id, { content: c.content, updatedAt: c.updatedAt })
+          await db.articles.update(l.id, { title: c.title, description: c.description || '', content: c.content, sortOrder: c.sortOrder ?? null, updatedAt: c.updatedAt })
           bump('updated', 'articles')
         }
+        c.__localArticleId = l.id
+        cloudIdOfLocalArticle.set(l.id, c.id)
       } else if (l && c && !cActive) {
         if (tomb) tombToClear.push(tomb.id)
         if (ts(l.updatedAt) > ts(c.updatedAt)) {
           // 本地删除后重建（本地新）→ 云端复活
           cloudOps.articles.update.push({
             id: c.id,
-            patch: { content: l.content, updatedAt: l.updatedAt, deletedAt: null }
+            patch: { title: l.title, description: l.description || '', content: l.content, sortOrder: l.sortOrder ?? null, updatedAt: l.updatedAt, deletedAt: null }
           })
           cloudArticleActive.add(c.id)
+          c.__localArticleId = l.id
+          cloudIdOfLocalArticle.set(l.id, c.id)
           bump('updated', 'articles')
         } else {
           // 云端删除生效 → 本地级联物理删
           await deleteLocalArticleCascade(l.id)
-          localArticleByKey.delete(key)
           bump('deleted', 'articles')
         }
       } else if (l && !c) {
@@ -210,8 +236,11 @@ export async function syncNow() {
             localId: l.id,
             payload: {
               username,
+              uid: l.uid,
               title: l.title,
+              description: l.description || '',
               content: l.content,
+              sortOrder: l.sortOrder ?? null,
               createdAt: l.createdAt,
               updatedAt: l.updatedAt
             }
@@ -222,14 +251,7 @@ export async function syncNow() {
         if (tomb) {
           if (ts(c.updatedAt) > ts(tomb.createdAt)) {
             // 云端在本地删除后更新过 → 云端赢，拉回本地
-            const id = await db.articles.add({
-              title: c.title,
-              content: c.content,
-              createdAt: c.createdAt || new Date(),
-              updatedAt: c.updatedAt || new Date()
-            })
-            localArticleByKey.set(key, { id, title: c.title, content: c.content, createdAt: c.createdAt, updatedAt: c.updatedAt })
-            bump('added', 'articles')
+            await pullArticleToLocal(c)
           } else {
             // 本地删除生效 → 云端软删
             cloudOps.articles.softDelete.push(c.id)
@@ -238,27 +260,11 @@ export async function syncNow() {
           }
           tombToClear.push(tomb.id)
         } else {
-          const id = await db.articles.add({
-            title: c.title,
-            content: c.content,
-            createdAt: c.createdAt || new Date(),
-            updatedAt: c.updatedAt || new Date()
-          })
-          localArticleByKey.set(key, { id, title: c.title, content: c.content, createdAt: c.createdAt, updatedAt: c.updatedAt })
-          bump('added', 'articles')
+          await pullArticleToLocal(c)
         }
       } else if (!l && c && !cActive) {
         if (tomb) tombToClear.push(tomb.id) // 双方都已删
       }
-    }
-
-    // 重建映射：有效云端文章 -> 本地文章（供后续单词/标记/翻译）
-    for (const c of cloud.articles) {
-      if (!cloudArticleActive.has(c.id)) continue
-      const k = tombstoneKey('articles', c)
-      const l = localArticleByKey.get(k)
-      c.__localArticleId = l ? l.id : undefined
-      if (l) cloudIdOfLocalArticle.set(l.id, c.id)
     }
   }
 

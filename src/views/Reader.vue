@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useArticleStore } from '../stores/article'
 import { useWordStore } from '../stores/word'
@@ -7,6 +7,7 @@ import { parseArticle, getWordContext } from '../services/parser'
 import { wordMarkService, contextTranslationService } from '../services/db'
 import { generateWordBasicInfo, generateWordContextTranslation, batchGenerateWords } from '../services/ai'
 import WordPopup from '../components/Word/WordPopup.vue'
+import EditArticleModal from '../components/Article/EditArticleModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -31,34 +32,17 @@ const contextError = ref(false)
 const isViewMode = computed(() => route.query.mode === 'view')
 const stickyHighlights = ref(new Map())
 
-const editingTitle = ref(false)
-const titleInput = ref('')
+const showEditModal = ref(false)
 
-function startEditTitle() {
-  if (!article.value) return
-  titleInput.value = article.value.title
-  editingTitle.value = true
-}
-
-async function saveTitle() {
-  const title = titleInput.value.trim()
-  if (!title) {
-    alert('标题不能为空')
-    return
-  }
-  await articleStore.updateArticle(article.value.id, { title })
+async function onArticleSaved() {
   article.value = await articleStore.fetchArticle(article.value.id)
-  editingTitle.value = false
-}
-
-function cancelEditTitle() {
-  editingTitle.value = false
-  titleInput.value = ''
 }
 
 const batchProgress = ref({ completed: 0, total: 0, running: false, error: null })
 
 const articleId = computed(() => parseInt(route.params.id))
+
+let autoGenerateTimer = null
 
 onMounted(async () => {
   article.value = await articleStore.fetchArticle(articleId.value)
@@ -71,16 +55,19 @@ onMounted(async () => {
   await loadArticleWords()
   const marks = await wordMarkService.getByArticle(articleId.value)
   localMarks.value = new Set(marks.map(m => m.occKey))
-  await autoGenerateAllWords()
+  // 延迟批量生成词义，等首屏渲染完成后再发起 AI 请求，避免进入页面瞬间卡顿
+  autoGenerateTimer = setTimeout(() => autoGenerateAllWords(), 600)
+})
+
+onUnmounted(() => {
+  if (autoGenerateTimer) {
+    clearTimeout(autoGenerateTimer)
+    autoGenerateTimer = null
+  }
 })
 
 async function loadArticleWords() {
-  const words = []
-  for (const word of parsedContent.value.words) {
-    const wordData = await wordStore.getOrCreateWord(word, articleId.value)
-    words.push(wordData)
-  }
-  articleWords.value = words
+  articleWords.value = await wordStore.getOrCreateMany(parsedContent.value.words, articleId.value)
 }
 
 function buildOccKeyWordMap() {
@@ -439,50 +426,22 @@ function renderContent() {
 
     <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 sm:p-8">
       <div class="flex flex-wrap items-center gap-3 mb-6">
-        <template v-if="editingTitle">
-          <input
-            v-model="titleInput"
-            type="text"
-            @keyup.enter="saveTitle"
-            @keyup.esc="cancelEditTitle"
-            class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-neutral-100 bg-white dark:bg-neutral-800 border border-blue-400 dark:border-blue-500 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full max-w-md"
-            autofocus
-          />
-          <button
-            @click="saveTitle"
-            class="text-green-600 hover:text-green-700"
-            title="保存标题"
-          >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-            </svg>
-          </button>
-          <button
-            @click="cancelEditTitle"
-            class="text-gray-400 hover:text-gray-600 dark:hover:text-neutral-300"
-            title="取消"
-          >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </template>
-        <template v-else>
-          <h1 class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-neutral-100">{{ article.title }}</h1>
-          <button
-            @click="startEditTitle"
-            class="text-gray-400 hover:text-blue-500"
-            title="编辑标题"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
-          </button>
-        </template>
+        <h1 class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-neutral-100">{{ article.title }}</h1>
+        <button
+          @click="showEditModal = true"
+          class="text-gray-400 hover:text-blue-500"
+          title="编辑文章"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+          </svg>
+        </button>
         <span v-if="!isViewMode" class="px-2 py-0.5 text-xs bg-green-100 dark:bg-neutral-800 text-green-700 dark:text-neutral-300 rounded-full">📖 学习模式</span>
         <span v-else class="px-2 py-0.5 text-xs bg-purple-100 dark:bg-neutral-800 text-purple-700 dark:text-neutral-300 rounded-full">📚 管理模式</span>
         <span v-if="isViewMode && localMarks.size > 0" class="ml-auto text-xs text-gray-400 dark:text-neutral-500">已标记 {{ localMarks.size }} 处</span>
       </div>
+
+      <p v-if="article.description" class="text-sm text-gray-500 dark:text-neutral-400 -mt-4 mb-6">{{ article.description }}</p>
 
       <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-4 mb-6">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。</p>
 
@@ -519,6 +478,13 @@ function renderContent() {
         </template>
       </div>
     </div>
+
+    <EditArticleModal
+      v-if="showEditModal"
+      :article="article"
+      @close="showEditModal = false"
+      @saved="onArticleSaved"
+    />
 
     <WordPopup
       v-if="selectedWord"

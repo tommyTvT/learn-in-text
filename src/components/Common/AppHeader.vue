@@ -1,13 +1,10 @@
 <script setup>
 import { RouterLink } from 'vue-router'
-import { useWordStore } from '../../stores/word'
 import ThemeToggle from './ThemeToggle.vue'
-
-const wordStore = useWordStore()
 
 const navLinks = [
   { to: '/', label: '首页' },
-  { to: '/vocabulary', label: '词库', badge: true },
+  { to: '/vocabulary', label: '词库' },
   { to: '/settings', label: '设置' },
 ]
 </script>
@@ -31,12 +28,6 @@ const navLinks = [
             active-class="bg-blue-50 dark:bg-neutral-800 text-blue-700 dark:text-neutral-100"
           >
             {{ link.label }}
-            <span
-              v-if="link.badge && wordStore.markedCount > 0"
-              class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 dark:bg-neutral-800 text-blue-800 dark:text-neutral-300"
-            >
-              {{ wordStore.markedCount }}
-            </span>
           </RouterLink>
           <ThemeToggle />
         </div>

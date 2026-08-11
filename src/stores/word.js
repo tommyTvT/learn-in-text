@@ -21,10 +21,14 @@ export const useWordStore = defineStore('word', () => {
   const markedWords = ref([])
   const loading = ref(false)
   const articleWordsMap = ref({})
+  // 是否已从本地库完成首次全量加载，供词库等页面复用，避免每次进入重复读全量数据
+  const loaded = ref(false)
 
   const markedCount = computed(() => markedWords.value.length)
 
-  async function fetchMarkedWords() {
+  async function fetchMarkedWords(force = false) {
+    // 已加载过且未强制刷新时直接返回，复用内存中的缓存数据
+    if (!force && loaded.value) return
     loading.value = true
     try {
       const allMarks = await wordMarkService.getAll()
@@ -35,6 +39,7 @@ export const useWordStore = defineStore('word', () => {
       const markedRecords = wordIds.map(id => wordMap[id]).filter(Boolean)
       markedWords.value = dedupeByWord(markedRecords)
       await fetchArticleWords()
+      loaded.value = true
     } finally {
       loading.value = false
     }
@@ -77,6 +82,10 @@ export const useWordStore = defineStore('word', () => {
     return await wordService.getOrCreate(word, articleId)
   }
 
+  async function getOrCreateMany(words, articleId) {
+    return await wordService.getOrCreateMany(words, articleId)
+  }
+
   async function updateWord(id, data) {
     const word = await wordService.update(id, data)
     const index = markedWords.value.findIndex(w => w.id === id)
@@ -104,6 +113,7 @@ export const useWordStore = defineStore('word', () => {
       }
     }
     await fetchArticleWords()
+    loaded.value = false // 标记状态已变更，失效缓存，下次进入词库重新加载
     return isNowMarked
   }
 
@@ -113,6 +123,7 @@ export const useWordStore = defineStore('word', () => {
     await wordService.deleteBySpelling(record.word)
     markedWords.value = markedWords.value.filter(w => w.word !== record.word)
     await fetchArticleWords()
+    loaded.value = false // 数据已变更，失效缓存
   }
 
   function exportArticleWordsTxt(articleId, title, selectedIds = []) {
@@ -144,7 +155,7 @@ export const useWordStore = defineStore('word', () => {
 
   async function importArticle(data) {
     const articleId = await exportService.importArticle(data)
-    await fetchMarkedWords()
+    await fetchMarkedWords(true)
     return articleId
   }
 
@@ -152,11 +163,13 @@ export const useWordStore = defineStore('word', () => {
     words,
     markedWords,
     loading,
+    loaded,
     markedCount,
     articleWordsMap,
     fetchMarkedWords,
     getArticleWords,
     getOrCreateWord,
+    getOrCreateMany,
     updateWord,
     updateContextTranslation,
     toggleMark,

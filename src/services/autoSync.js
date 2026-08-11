@@ -87,18 +87,38 @@ export function setLastSyncState(success, message, detail = null, source = 'manu
   debugLogSync(source, success, message, detail)
 }
 
+// 翻页触发的同步延迟防抖：切换页面后等待一段时间再执行，
+// 避免与页面切换动画、首屏渲染抢占资源导致卡顿；多次快速翻页只同步一次。
+const ROUTE_SYNC_DELAY_MS = 1500
+let routeSyncTimer = null
+
 /**
  * 公开的同步请求入口：受防重入 / 失败退避 / 跨标签页锁保护。
  * 供切换页面（路由）、网络恢复等场景调用；未配置或时机不合适时静默跳过。
+ * 路由触发的同步延迟防抖执行，避免翻页瞬间抢资源。
  */
 export function requestSync() {
-  runSync('route')
+  if (routeSyncTimer) clearTimeout(routeSyncTimer)
+  routeSyncTimer = setTimeout(() => {
+    routeSyncTimer = null
+    runSync('route')
+  }, ROUTE_SYNC_DELAY_MS)
 }
 
 function isConfigured() {
   const s = useSettingsStore()
   const auth = useAuthStore()
   return !!(auth.isLoggedIn && s.supabaseUrl?.trim() && s.supabaseAnonKey?.trim())
+}
+
+/**
+ * 自动同步开关是否生效：
+ * 手动同步（设置页点击）不经过 runSync，直接调用 syncNow，不受此开关影响。
+ * 其余所有自动触发源（翻页/启动/定时/切前台/网络恢复）都受该开关控制。
+ */
+function autoSyncEnabled() {
+  const s = useSettingsStore()
+  return !!s.autoSync
 }
 
 function acquireLock() {
@@ -130,6 +150,7 @@ function releaseLock() {
  * source 用于调试输出，标明本次同步的触发来源。
  */
 async function runSync(source = 'auto') {
+  if (!autoSyncEnabled()) return
   if (running || !isConfigured()) return
   if (Date.now() - lastAttemptAt < RETRY_BACKOFF_MS) return
   if (!acquireLock()) return
@@ -222,6 +243,10 @@ export function stopAutoSync() {
   if (bootDelayTimer) {
     clearTimeout(bootDelayTimer)
     bootDelayTimer = null
+  }
+  if (routeSyncTimer) {
+    clearTimeout(routeSyncTimer)
+    routeSyncTimer = null
   }
   clearTimer()
   document.removeEventListener('visibilitychange', onVisibility)

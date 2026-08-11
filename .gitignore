@@ -1,6 +1,12 @@
 # Logs
 logs
 *.log
+
+# 调试/过程产物（不追踪）
+.playwright-cli/
+shots/
+home.yaml
+docs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -20,7 +26,7 @@ dist-ssr
 
 # WorkBuddy project data (internal, do not commit)
 .workbuddy/
-
+.codebuddy/
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

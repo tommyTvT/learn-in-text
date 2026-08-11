@@ -8,6 +8,7 @@ const router = useRouter()
 const articleStore = useArticleStore()
 const wordStore = useWordStore()
 const newArticleTitle = ref('')
+const newArticleDescription = ref('')
 const newArticleContent = ref('')
 const showImportModal = ref(false)
 const importText = ref('')
@@ -19,6 +20,7 @@ async function createArticle() {
   }
   const article = await articleStore.createArticle({
     title: newArticleTitle.value.trim(),
+    description: newArticleDescription.value.trim(),
     content: newArticleContent.value.trim()
   })
   router.push(`/reader/${article.id}`)
@@ -95,6 +97,18 @@ async function importArticleJson(event) {
             placeholder="输入文章标题"
             class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
           />
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">
+            描述
+            <span class="text-xs text-gray-400 dark:text-neutral-500">（可选）</span>
+          </label>
+          <textarea
+            v-model="newArticleDescription"
+            rows="2"
+            placeholder="一句话概括文章大致内容..."
+            class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+          ></textarea>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">内容</label>

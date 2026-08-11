@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { generateArticle, generateArticleTitle } from '../services/ai'
+import { generateArticle, generateArticleMeta } from '../services/ai'
 import { useArticleStore } from '../stores/article'
 import { useWordStore } from '../stores/word'
 
@@ -32,6 +32,7 @@ const generatingTitle = ref(false)
 const error = ref('')
 const result = ref(null)
 const resultTitle = ref('')
+const resultDescription = ref('')
 
 onMounted(async () => {
   await wordStore.fetchMarkedWords()
@@ -43,6 +44,17 @@ onMounted(async () => {
       .filter(Boolean)
   }
 })
+
+// 返回上一页：从主页进入退回主页，从词库进入退回词库。
+// 若无历史可回退（如直接访问该页），根据是否携带 words 参数判断来源（词库进入会带，主页进入不带）
+function goBack() {
+  const historyState = window.history.state
+  if (historyState && historyState.back) {
+    router.back()
+  } else {
+    router.push(route.query.words ? '/vocabulary' : '/')
+  }
+}
 
 function switchMode(newMode) {
   mode.value = newMode
@@ -123,7 +135,8 @@ async function generate() {
     })
     result.value = content.trim()
     resultTitle.value = `AI生成文章 - ${new Date().toLocaleDateString('zh-CN')}`
-    autoGenerateTitle()
+    resultDescription.value = ''
+    autoGenerateMeta()
   } catch (e) {
     error.value = e.message
   } finally {
@@ -131,20 +144,23 @@ async function generate() {
   }
 }
 
-async function autoGenerateTitle() {
+async function autoGenerateMeta() {
   if (!result.value) return
   generatingTitle.value = true
   try {
-    const title = await generateArticleTitle(result.value, {
+    const meta = await generateArticleMeta(result.value, {
       mode: mode.value,
       essayType: essayType.value,
       style: articleStyle.value
     })
-    if (title) {
-      resultTitle.value = title
+    if (meta.title) {
+      resultTitle.value = meta.title
+    }
+    if (meta.description) {
+      resultDescription.value = meta.description
     }
   } catch (e) {
-    console.error('AI标题生成失败:', e.message)
+    console.error('AI标题/描述生成失败:', e.message)
   } finally {
     generatingTitle.value = false
   }
@@ -152,7 +168,7 @@ async function autoGenerateTitle() {
 
 async function regenerateTitle() {
   if (generatingTitle.value) return
-  await autoGenerateTitle()
+  await autoGenerateMeta()
 }
 
 async function saveArticle() {
@@ -160,6 +176,7 @@ async function saveArticle() {
   try {
     const article = await articleStore.createArticle({
       title: resultTitle.value.trim() || 'AI生成文章',
+      description: resultDescription.value.trim(),
       content: result.value
     })
     router.push(`/reader/${article.id}`)
@@ -173,9 +190,9 @@ async function saveArticle() {
   <div>
     <div class="mb-8 flex items-center gap-4">
       <button
-        @click="router.push('/vocabulary')"
+        @click="goBack"
         class="p-2 rounded-md text-gray-500 dark:text-neutral-400 hover:bg-gray-100 dark:hover:bg-neutral-800 hover:text-gray-700 dark:hover:text-neutral-200"
-        title="返回词库"
+        title="返回"
       >
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -397,6 +414,18 @@ async function saveArticle() {
                 <span class="hidden sm:inline">{{ generatingTitle ? '生成中...' : 'AI标题' }}</span>
               </button>
             </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">
+              文章描述
+              <span class="text-xs text-gray-400 dark:text-neutral-500">（可选，AI 生成中文描述，可修改）</span>
+            </label>
+            <textarea
+              v-model="resultDescription"
+              rows="2"
+              placeholder="一句话概括文章大致内容..."
+              class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+            ></textarea>
           </div>
           <div class="text-xs text-gray-500 dark:text-neutral-400">
             约 {{ resultWordCount }} 个英文单词

@@ -17,8 +17,162 @@
 body {
   margin: 0;
   min-height: 100dvh;
+  /* 始终保留纵向滚动条占位，避免页面切换时滚动条出现/消失造成的宽度跳动与违和感 */
+  overflow-y: scroll;
+  /* 阻止页面切换动画中元素位移溢出触发的横向滚动条 */
+  overflow-x: hidden;
 }
 
 #app {
   min-height: 100dvh;
+}
+
+/* ============================================================
+   全局页面切换过渡动画
+   说明：这些过渡类（.xxx-enter-active 等）由 Vue 运行时在
+   <Transition> 切换时动态添加到元素上，必须定义在全局（非 scoped）
+   样式中才能命中。仅使用 transform 与 opacity，确保 GPU 加速、
+   移动端流畅。
+
+   翻页设计要点（仿原生导航 push / pop）：
+   - 前进（slide-left）：新页从右侧整页滑入盖住旧页，旧页静止不动，
+     像翻开新的一页覆盖在旧页上
+   - 返回（slide-right）：旧页整页向右滑出露出下层新页，新页静止不动，
+     像把当前页翻回去露出前页
+   - 不做透明度 / 缩放变化，避免“淡入感”；整页位移连续无间隙
+   - 浮起的页带柔和投影，强化“纸张叠放”的层次感
+
+   两个关键坑（务必保持）：
+   1. leave 端必须带 transition：否则 Vue 检测到 leave 无过渡会立即
+      移除旧页，导致容器高度塌陷，绝对定位的新页高度变 0、内容被裁剪，
+      表现为“切换没有动画”
+   2. 滑动中的页必须有“不透明背景 + 覆盖整个视口”：
+      - 背景不透明：页面根元素默认透明，翻页时（尤其返回时旧页滑出）
+        会透过透明区域提前看到下层页面
+      - min-height: 100dvh 且不用 overflow: hidden：absolute 元素高度
+        只到容器高度，若新页内容比容器高会被裁剪，应让背景覆盖整个
+        视口（横向溢出由 body 的 overflow-x: hidden 兜底）
+   ============================================================ */
+
+/* ---------- 淡入淡出（bare 布局：登录/注册/邮箱验证） ---------- */
+/* leave 端 absolute 脱离文档流，避免双页同流期间容器高度被拉长、
+   动画结束后跳变 */
+.fade-enter-active {
+  position: relative;
+  overflow: hidden;
+  transition: opacity 0.16s ease;
+}
+.fade-leave-active {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  transition: opacity 0.16s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* ---------- 前进（左滑）：新页从右侧整页滑入盖住旧页，旧页静止 ---------- */
+/* 结构要点（与 slide-right 对称的安全结构）：
+   - 新页 relative 留在文档流撑起容器高度，用 transform 从右侧滑入
+   - 旧页 absolute 脱离文档流静止垫底
+   这样动画结束的清理顺序（新页移除类 / 旧页卸载）无论先后都不会
+   引起布局跳变——若反过来（新页 absolute、旧页 relative 撑高度），
+   新页的 absolute 类一旦先于旧页卸载被移除，新页会瞬间掉回文档流
+   排到旧页下方再跳回，表现为偶发的"闪一下"。 */
+.slide-left-enter-active {
+  position: relative;
+  z-index: 10;
+  will-change: transform;
+  transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+  /* 背景至少覆盖整个视口：否则新页内容比视口矮时，内容高度以下
+     的区域会透出底下静止的旧页，表现为"上半部分滑动、下半部分
+     残留旧页，动画结束后才同步" */
+  min-height: 100vh;
+  min-height: 100dvh;
+  /* 不透明背景遮住下层旧页，杜绝透明区域透出残影 */
+  background-color: rgb(249 250 251);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.08);
+}
+.dark .slide-left-enter-active {
+  background-color: rgb(9 9 11);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.35);
+}
+.slide-left-enter-from {
+  transform: translateX(100%);
+}
+.slide-left-leave-active {
+  /* 旧页 absolute 脱离文档流静止垫底；transition 声明让 Vue 在动画
+     期间保留旧页（时长兜底），动画结束后才卸载 */
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+  will-change: transform;
+}
+
+/* ---------- 返回（右滑）：旧页整页向右滑出露出新页，新页静止 ---------- */
+.slide-right-leave-active {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  z-index: 10;
+  will-change: transform;
+  transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+  /* 旧页滑出时也要不透明，否则会透过它提前看到下层新页 */
+  background-color: rgb(249 250 251);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.08);
+}
+.dark .slide-right-leave-active {
+  background-color: rgb(9 9 11);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 0.35);
+}
+.slide-right-leave-to {
+  transform: translateX(100%);
+}
+.slide-right-enter-active {
+  /* 新页静止在下层文档流：撑起容器高度 */
+  position: relative;
+  transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ---------- 移动端：时长略短，更跟手 ---------- */
+@media (max-width: 768px) {
+  .slide-left-enter-active,
+  .slide-left-leave-active,
+  .slide-right-leave-active,
+  .slide-right-enter-active {
+    transition: transform 0.26s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+}
+
+/* ---------- 无障碍：尊重用户的“减少动态效果”偏好 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .fade-enter-active,
+  .fade-leave-active,
+  .slide-left-enter-active,
+  .slide-left-leave-active,
+  .slide-right-enter-active,
+  .slide-right-leave-active {
+    transition: opacity 0.12s ease;
+    box-shadow: none;
+  }
+  .fade-enter-from,
+  .fade-leave-to,
+  .slide-left-enter-from,
+  .slide-left-leave-to,
+  .slide-right-enter-from,
+  .slide-right-leave-to {
+    transform: none;
+    opacity: 0;
+  }
 }
