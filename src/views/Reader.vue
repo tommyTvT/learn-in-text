@@ -412,7 +412,7 @@ const renderedParagraphs = computed(() => {
 
 <template>
   <div v-if="article">
-    <div class="mb-6">
+    <div class="mb-4">
       <button
         @click="router.push('/')"
         class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 flex items-center"
@@ -424,9 +424,9 @@ const renderedParagraphs = computed(() => {
       </button>
     </div>
 
-    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 sm:p-8">
-      <div class="flex flex-wrap items-center gap-3 mb-6">
-        <h1 class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-neutral-100">{{ article.title }}</h1>
+    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 sm:p-6">
+      <div class="flex flex-wrap items-center gap-3 mb-4">
+        <h1 class="text-lg sm:text-xl font-bold text-gray-900 dark:text-neutral-100">{{ article.title }}</h1>
         <button
           @click="showEditModal = true"
           class="text-gray-400 hover:text-blue-500"
@@ -441,9 +441,9 @@ const renderedParagraphs = computed(() => {
         <span v-if="isViewMode && localMarks.size > 0" class="ml-auto text-xs text-gray-400 dark:text-neutral-500">已标记 {{ localMarks.size }} 处</span>
       </div>
 
-      <p v-if="article.description" class="text-sm text-gray-500 dark:text-neutral-400 -mt-4 mb-6">{{ article.description }}</p>
+      <p v-if="article.description" class="text-sm text-gray-500 dark:text-neutral-400 -mt-2 mb-5">{{ article.description }}</p>
 
-      <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-4 mb-6">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。</p>
+      <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-2 mb-5">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。</p>
 
       <div v-if="batchProgress.running" class="mb-4">
         <div class="flex justify-between text-sm text-gray-600 dark:text-neutral-400 mb-1">

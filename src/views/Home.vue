@@ -89,15 +89,15 @@ function formatDate(date) {
 
 <template>
   <div>
-    <div class="mb-8 flex items-center justify-between">
+    <div class="mb-4 flex items-center justify-between">
       <div>
-        <h1 class="text-3xl font-bold text-gray-900 dark:text-neutral-100 mb-2">开始学习</h1>
-        <p class="text-gray-600 dark:text-neutral-400">导入英文文章，在语境中学习单词</p>
+        <h1 class="text-xl font-bold text-gray-900 dark:text-neutral-100 mb-1.5">开始学习</h1>
+        <p class="text-gray-600 dark:text-neutral-400 text-sm">导入英文文章，在语境中学习单词</p>
       </div>
       <div class="flex items-center gap-2 shrink-0">
         <button
           @click="router.push('/new')"
-          class="inline-flex items-center gap-1.5 px-4 h-10 bg-blue-600 text-white text-sm font-medium rounded-lg shadow hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+          class="inline-flex items-center gap-2 px-5 h-10 bg-blue-600 text-white text-sm font-medium rounded-lg shadow hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
           title="新建文章"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -118,7 +118,7 @@ function formatDate(date) {
       </div>
     </div>
 
-    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
       <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">最近文章</h2>
       <div v-if="articleStore.loading" class="text-center py-8 text-gray-500 dark:text-neutral-400">
         加载中...
@@ -131,7 +131,7 @@ function formatDate(date) {
           v-for="article in articleStore.articles"
           :key="article.id"
           @click="openArticle(article.id)"
-          class="p-4 border border-gray-200 dark:border-neutral-800 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors"
+          class="p-3.5 border border-gray-200 dark:border-neutral-800 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors"
         >
           <div class="flex justify-between items-start">
             <div

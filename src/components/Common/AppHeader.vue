@@ -12,19 +12,19 @@ const navLinks = [
 <template>
   <nav class="bg-white dark:bg-neutral-900 shadow-sm border-b border-gray-200 dark:border-neutral-800">
     <div class="mx-auto px-4 sm:px-6 lg:px-8 w-[min(95vw,1600px)]">
-      <div class="flex justify-between h-16">
+      <div class="flex justify-between h-14">
         <div class="flex items-center">
           <RouterLink to="/" class="flex items-center space-x-2">
-            <span class="text-2xl">📚</span>
-            <span class="text-xl font-bold text-gray-900 dark:text-neutral-100">Learn in Text</span>
+            <span class="text-xl">📚</span>
+            <span class="text-lg font-bold text-gray-900 dark:text-neutral-100">Learn in Text</span>
           </RouterLink>
         </div>
-        <div class="hidden md:flex items-center space-x-4">
+        <div class="hidden md:flex items-center space-x-2">
           <RouterLink
             v-for="link in navLinks"
             :key="link.to"
             :to="link.to"
-            class="px-3 py-2 rounded-md text-sm font-medium text-gray-700 dark:text-neutral-300 hover:text-gray-900 dark:hover:text-neutral-100 hover:bg-gray-100 dark:hover:bg-neutral-800"
+            class="px-4 py-2 rounded-md text-sm font-medium text-gray-700 dark:text-neutral-300 hover:text-gray-900 dark:hover:text-neutral-100 hover:bg-gray-100 dark:hover:bg-neutral-800"
             active-class="bg-blue-50 dark:bg-neutral-800 text-blue-700 dark:text-neutral-100"
           >
             {{ link.label }}

@@ -146,51 +146,51 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
 
 <template>
   <div>
-    <div class="mb-6">
-      <h1 class="text-3xl font-bold text-gray-900 dark:text-neutral-100 mb-2">我的词库</h1>
-      <p class="text-gray-600 dark:text-neutral-400">
+    <div class="mb-4">
+      <h1 class="text-xl font-bold text-gray-900 dark:text-neutral-100 mb-1.5">我的词库</h1>
+      <p class="text-gray-600 dark:text-neutral-400 text-sm">
         已标记 {{ totalMarkedWords }} 个单词，分布在 {{ articlesWithWords.length }} 篇文章中
       </p>
     </div>
 
-    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6 mb-6">
+    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 mb-5">
       <div class="flex flex-wrap items-center gap-2">
         <button
           @click="expandAll"
-          class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
+          class="px-3 py-1 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
         >
           全部展开
         </button>
         <button
           @click="collapseAll"
-          class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
+          class="px-3 py-1 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
         >
           全部折叠
         </button>
         <button
           @click="selectAllVisible"
-          class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
+          class="px-3 py-1 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
         >
           {{ selectedWords.length === wordStore.markedWords.length ? '取消全选' : '全选' }}
         </button>
         <button
           @click="deleteSelected"
           :disabled="selectedWords.length === 0"
-          class="px-3 py-1.5 text-sm bg-red-100 dark:bg-neutral-800 text-red-700 dark:text-neutral-300 rounded-md hover:bg-red-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          class="px-3 py-1 text-sm bg-red-100 dark:bg-neutral-800 text-red-700 dark:text-neutral-300 rounded-md hover:bg-red-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           删除选中 ({{ selectedWords.length }})
         </button>
         <button
           @click="goToGenerate"
           :disabled="selectedWords.length === 0"
-          class="px-3 py-1.5 text-sm bg-purple-100 dark:bg-neutral-800 text-purple-700 dark:text-neutral-300 rounded-md hover:bg-purple-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          class="px-3 py-1 text-sm bg-purple-100 dark:bg-neutral-800 text-purple-700 dark:text-neutral-300 rounded-md hover:bg-purple-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           AI 生成文章
         </button>
         <button
           @click="exportSelectedTxt"
           :disabled="selectedWords.length === 0"
-          class="px-3 py-1.5 text-sm bg-orange-100 dark:bg-neutral-800 text-orange-700 dark:text-neutral-300 rounded-md hover:bg-orange-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          class="px-3 py-1 text-sm bg-orange-100 dark:bg-neutral-800 text-orange-700 dark:text-neutral-300 rounded-md hover:bg-orange-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           导出选中TXT
         </button>
@@ -218,47 +218,49 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
       >
         <div
           @click="toggleArticle(article.id)"
-          class="px-4 sm:px-6 py-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors flex items-center justify-between gap-2 flex-wrap"
+          class="px-4 sm:px-5 py-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors"
         >
-          <div class="flex items-center gap-3 min-w-0">
-            <svg
-              :class="[
-                'w-5 h-5 text-gray-400 transition-transform flex-shrink-0',
-                isArticleExpanded(article.id) ? 'rotate-90' : ''
-              ]"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-            </svg>
-            <h3 class="font-semibold text-gray-900 dark:text-neutral-100 truncate">{{ article.title }}</h3>
-          </div>
-          <div class="flex items-center gap-3 flex-shrink-0 flex-wrap justify-end">
-            <span class="text-sm text-gray-500 dark:text-neutral-400">
-              {{ getArticleWords(article.id).length }} 个单词
-            </span>
-            <span class="text-xs text-gray-400 dark:text-neutral-500">
-              {{ formatDate(article.updatedAt) }}
-            </span>
-            <button
-              @click.stop="goToArticle(article.id)"
-              class="px-2 py-1 text-xs bg-blue-50 dark:bg-neutral-800 text-blue-600 dark:text-neutral-300 rounded hover:bg-blue-100 dark:hover:bg-neutral-700"
-            >
-              管理模式
-            </button>
-            <button
-              @click.stop="exportArticleTxt(article.id, article.title)"
-              class="px-2 py-1 text-xs bg-orange-50 dark:bg-neutral-800 text-orange-600 dark:text-neutral-300 rounded hover:bg-orange-100 dark:hover:bg-neutral-700"
-              title="导出该文章单词为TXT"
-            >
-              导出TXT
-            </button>
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex items-start gap-2.5 min-w-0 flex-1">
+              <svg
+                :class="[
+                  'w-5 h-5 mt-0.5 text-gray-400 transition-transform flex-shrink-0',
+                  isArticleExpanded(article.id) ? 'rotate-90' : ''
+                ]"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+              </svg>
+              <div class="min-w-0 flex-1">
+                <h3 class="font-semibold text-gray-900 dark:text-neutral-100 leading-snug break-words line-clamp-2">{{ article.title }}</h3>
+                <div class="flex items-center gap-3 mt-1 text-sm text-gray-500 dark:text-neutral-400">
+                  <span>{{ getArticleWords(article.id).length }} 个单词</span>
+                  <span class="text-xs text-gray-400 dark:text-neutral-500">{{ formatDate(article.updatedAt) }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <button
+                @click.stop="goToArticle(article.id)"
+                class="px-2.5 py-1 text-xs bg-blue-50 dark:bg-neutral-800 text-blue-600 dark:text-neutral-300 rounded hover:bg-blue-100 dark:hover:bg-neutral-700"
+              >
+                管理模式
+              </button>
+              <button
+                @click.stop="exportArticleTxt(article.id, article.title)"
+                class="px-2.5 py-1 text-xs bg-orange-50 dark:bg-neutral-800 text-orange-600 dark:text-neutral-300 rounded hover:bg-orange-100 dark:hover:bg-neutral-700"
+                title="导出该文章单词为TXT"
+              >
+                导出TXT
+              </button>
+            </div>
           </div>
         </div>
 
-        <div v-if="isArticleExpanded(article.id)" class="px-4 sm:px-6 pb-4 border-t border-gray-100 dark:border-neutral-800">
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+        <div v-if="isArticleExpanded(article.id)" class="px-4 sm:px-5 pb-3 border-t border-gray-100 dark:border-neutral-800">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
             <div
               v-for="word in getArticleWords(article.id)"
               :key="word.id"

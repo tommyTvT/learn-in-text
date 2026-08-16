@@ -63,16 +63,16 @@ onMounted(() => {
   <div class="min-h-[70vh] flex items-center justify-center">
     <div class="w-full max-w-md px-4">
       <!-- 品牌区 -->
-      <div class="text-center mb-8">
-        <div class="mx-auto w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-3xl shadow-lg shadow-blue-500/20 mb-4">
+      <div class="text-center mb-6">
+        <div class="mx-auto w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-2xl shadow-lg shadow-blue-500/20 mb-3">
           📚
         </div>
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-neutral-100">创建账号</h1>
+        <h1 class="text-xl font-bold text-gray-900 dark:text-neutral-100">创建账号</h1>
         <p class="mt-2 text-sm text-gray-500 dark:text-neutral-400">注册后可启用云同步，多设备学习</p>
       </div>
 
       <!-- 表单卡片 -->
-      <div class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-gray-200 dark:border-neutral-800 p-6 sm:p-8">
+      <div class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-gray-200 dark:border-neutral-800 p-5 sm:p-6">
         <form @submit.prevent="onSubmit" class="space-y-5">
           <div>
             <label for="username" class="block text-sm font-medium text-gray-700 dark:text-neutral-300">用户名</label>
@@ -166,7 +166,7 @@ onMounted(() => {
           </button>
         </form>
 
-        <p class="mt-6 text-center text-sm text-gray-500 dark:text-neutral-400">
+        <p class="mt-5 text-center text-sm text-gray-500 dark:text-neutral-400">
           已有账号？
           <RouterLink to="/login" class="text-blue-600 dark:text-blue-400 hover:underline">去登录</RouterLink>
         </p>

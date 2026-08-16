@@ -113,8 +113,8 @@ onUnmounted(() => {
     <AppHeader v-if="!isBare" />
     <main
       :class="[
-        'mx-auto px-4 sm:px-6 lg:px-8 py-8 w-[min(95vw,1600px)]',
-        hideMobileTab ? 'pb-8' : 'pb-24 md:pb-8'
+        'mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-6 w-[min(95vw,1600px)]',
+        hideMobileTab ? 'pb-6' : 'pb-20 md:pb-6'
       ]"
     >
       <div class="relative">

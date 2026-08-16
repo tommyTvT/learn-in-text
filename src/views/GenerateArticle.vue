@@ -1,7 +1,8 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { generateArticle, generateArticleMeta } from '../services/ai'
+import { generateArticle, generateArticleMeta, extractTaskFromImage, IMAGE_MAX_TOKENS } from '../services/ai'
+import { prepareImageForAI } from '../services/image'
 import { useArticleStore } from '../stores/article'
 import { useWordStore } from '../stores/word'
 
@@ -19,6 +20,17 @@ const wordCount = ref(80)
 const customDescription = ref('')
 const sourceArticle = ref('')
 const fileInput = ref(null)
+const taskImageInput = ref(null)
+const taskImagePreviews = ref([])
+const recognizingTask = ref(false)
+const taskImageError = ref('')
+const taskProgress = ref(0)
+const taskProgressMax = ref(IMAGE_MAX_TOKENS)
+
+const taskProgressPercent = computed(() => {
+  if (!taskProgressMax.value) return 0
+  return Math.min(100, Math.round((taskProgress.value / taskProgressMax.value) * 100))
+})
 
 const essayWordCountPresets = [50, 80, 120, 150, 200]
 const articleWordCountPresets = [150, 300, 500, 800]
@@ -114,6 +126,68 @@ function onFileUpload(event) {
   event.target.value = ''
 }
 
+function triggerTaskImagePicker() {
+  if (taskImageInput.value) taskImageInput.value.click()
+}
+
+// 拍照 / 上传题目图片 → AI 解析写作要求 → 回填生成参数（支持多张图片）
+async function handleTaskImageUpload(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  if (!files.length) return
+
+  taskImageError.value = ''
+  taskImagePreviews.value = files.map(f => URL.createObjectURL(f))
+  recognizingTask.value = true
+  taskProgressMax.value = IMAGE_MAX_TOKENS * files.length
+  taskProgress.value = 0
+
+  try {
+    let merged = null
+    let completed = 0
+    for (const file of files) {
+      const dataUrl = await prepareImageForAI(file)
+      // 流式进度：当前已完成图片的 token 预算 + 当前图片已生成 token
+      const result = await extractTaskFromImage(dataUrl, (currentTokens) => {
+        taskProgress.value = completed * IMAGE_MAX_TOKENS + currentTokens
+      })
+      completed++
+      taskProgress.value = completed * IMAGE_MAX_TOKENS
+      if (!merged) {
+        merged = result
+      } else {
+        // 多张图片结果合并：以第一张为主，叠加单词、拼接原文材料等
+        if (result.words?.length) {
+          merged.words = [...new Set([...(merged.words || []), ...result.words])]
+        }
+        if (result.sourceArticle) {
+          merged.sourceArticle = [merged.sourceArticle, result.sourceArticle].filter(Boolean).join('\n\n')
+        }
+        if (result.customDescription && !merged.customDescription) {
+          merged.customDescription = result.customDescription
+        }
+      }
+    }
+    if (!merged) throw new Error('未能从图片中识别出写作要求')
+
+    mode.value = merged.mode
+    essayType.value = merged.essayType
+    format.value = merged.format
+    articleStyle.value = merged.style
+    wordCount.value = Math.min(2000, Math.max(20, Math.round(Number(merged.wordCount) || 80)))
+    customDescription.value = merged.customDescription || ''
+    sourceArticle.value = merged.sourceArticle || ''
+    if (merged.words.length) {
+      words.value = [...new Set([...words.value, ...merged.words])]
+    }
+  } catch (e) {
+    taskImageError.value = e.message
+  } finally {
+    taskProgress.value = taskProgressMax.value
+    recognizingTask.value = false
+  }
+}
+
 async function generate() {
   if (mode.value === 'essay' && essayType.value === 'long') {
     if (!sourceArticle.value.trim()) {
@@ -188,7 +262,7 @@ async function saveArticle() {
 
 <template>
   <div>
-    <div class="mb-8 flex items-center gap-4">
+    <div class="mb-6 flex items-center gap-4">
       <button
         @click="goBack"
         class="p-2 rounded-md text-gray-500 dark:text-neutral-400 hover:bg-gray-100 dark:hover:bg-neutral-800 hover:text-gray-700 dark:hover:text-neutral-200"
@@ -199,14 +273,51 @@ async function saveArticle() {
         </svg>
       </button>
       <div>
-        <h1 class="text-3xl font-bold text-gray-900 dark:text-neutral-100">AI 生成文章</h1>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-neutral-100">AI 生成文章</h1>
         <p class="text-gray-600 dark:text-neutral-400 mt-1">配置参数，定制一篇专属英语阅读文章（单词可选）</p>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-neutral-100 mb-4">生成参数</h2>
+        <div class="mb-4">
+          <button
+            @click="triggerTaskImagePicker"
+            :disabled="recognizingTask"
+            class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm bg-purple-50 dark:bg-neutral-800 border border-purple-200 dark:border-neutral-700 text-purple-700 dark:text-purple-300 rounded-md hover:bg-purple-100 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            {{ recognizingTask ? 'AI 识别题目中...' : '拍照识别题目要求' }}
+          </button>
+          <input ref="taskImageInput" type="file" accept="image/*" multiple class="hidden" @change="handleTaskImageUpload" />
+          <div v-if="recognizingTask" class="mt-2 p-2.5 rounded-md border border-purple-200 dark:border-neutral-700 bg-purple-50/50 dark:bg-neutral-800">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-medium text-purple-700 dark:text-purple-300">AI 识别题目中…</span>
+              <span class="text-xs text-gray-500 dark:text-neutral-400">{{ taskProgressPercent }}%</span>
+            </div>
+            <div class="h-1.5 w-full rounded-full bg-purple-100 dark:bg-neutral-700 overflow-hidden">
+              <div class="h-full rounded-full bg-purple-600" :style="{ width: taskProgressPercent + '%' }"></div>
+            </div>
+            <p class="mt-1 text-xs text-gray-500 dark:text-neutral-400">{{ taskProgress }} / {{ taskProgressMax }} tokens（共 {{ taskImagePreviews.length }} 张图片）</p>
+          </div>
+          <div v-if="taskImagePreviews.length" class="mt-2 flex items-start gap-2 flex-wrap">
+            <img
+              v-for="(src, i) in taskImagePreviews"
+              :key="i"
+              :src="src"
+              alt="题目图片预览"
+              class="w-16 h-16 object-cover rounded-md border border-gray-200 dark:border-neutral-700 shrink-0"
+            />
+            <p class="text-xs text-gray-500 dark:text-neutral-400 leading-relaxed">
+              已识别题目要求并自动填入下方参数，可微调后再生成。
+            </p>
+          </div>
+          <p v-if="taskImageError" class="mt-2 text-sm text-red-600 dark:text-red-400">{{ taskImageError }}</p>
+        </div>
         <div class="grid grid-cols-2 gap-1 p-1 bg-gray-100 dark:bg-neutral-800 rounded-lg mb-5">
           <button
             @click="switchMode('essay')"
@@ -381,7 +492,7 @@ async function saveArticle() {
         </div>
       </div>
 
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-neutral-100 mb-4">生成结果</h2>
         <div v-if="error" class="mb-4 p-3 rounded-md bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 text-sm text-red-600 dark:text-red-400">
           {{ error }}

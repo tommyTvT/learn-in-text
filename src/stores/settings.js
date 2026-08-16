@@ -27,7 +27,11 @@ const DEFAULT_CONTEXT_MAX_TOKENS = 200
 const DEFAULT_ARTICLE_MAX_TOKENS = 2000
 const DEFAULT_REQUEST_TIMEOUT = 30
 const DEFAULT_AUTO_SYNC = true
-// 字体大小（百分比）：100% = 浏览器默认根字号，由用户在设置页调整
+// 字体大小（百分比）：100% = 浏览器默认根字号（16px），由用户在设置页调整。
+// 界面元素的字号已直接按「旧版 175% 的效果」焊死在 CSS 值中
+// （见 style.css 的 @theme 文字刻度重定义），因此根字号保持 100% 时
+// 界面即呈现旧版 175% 的放大阅读效果；用户拖动滑块只是在此基准上
+// 进一步等比缩放所有 rem 尺寸。
 const DEFAULT_FONT_SIZE = 100
 const FONT_SIZE_MIN = 60
 const FONT_SIZE_MAX = 200
@@ -50,33 +54,66 @@ function createPresetProvider(presetKey) {
     name: preset.name,
     preset: presetKey,
     endpoint: preset.endpoint,
-    model: preset.model,
     apiKey: ''
   }
 }
 
+/** 供应商（共享资源池）只保留连接信息，模型选择下放到「文本模型 / 视觉模型」配置 */
 function normalizeProvider(raw) {
   if (!raw || typeof raw !== 'object') return null
   if (raw.preset) {
-    // 已下架的预设（如阿里百炼）直接丢弃
+    // 已下架的预设直接丢弃
     if (!PRESET_PROVIDERS[raw.preset]) return null
-    // 预设供应商的端点始终跟随预设定义，模型和 apiKey 允许用户自定义
+    // 预设供应商的端点始终跟随预设定义，仅 apiKey 允许用户自定义
     const base = createPresetProvider(raw.preset)
-    return { ...base, model: raw.model || base.model, apiKey: raw.apiKey || '' }
+    return { ...base, apiKey: raw.apiKey || '' }
   }
   return {
     id: raw.id || 'custom-' + Date.now().toString(36) + '-' + (++providerSeq),
     name: raw.name || '自定义供应商',
     preset: null,
     endpoint: raw.endpoint || '',
-    model: raw.model || '',
     apiKey: raw.apiKey || ''
   }
 }
 
+/** 规范化单份模型配置：{ providerId, model } */
+function normalizeModelConfig(raw, providers) {
+  if (raw && typeof raw === 'object' && providers.some(p => p.id === raw.providerId)) {
+    return { providerId: raw.providerId, model: raw.model || '' }
+  }
+  return { providerId: providers[0]?.id || '', model: '' }
+}
+
+/**
+ * 解析文本/视觉模型配置，兼容旧结构（供应商内嵌 model/visionModel + activeProviderId）。
+ * 返回 { text, vision }。
+ */
+function resolveModelConfigs(data, providers) {
+  let text = normalizeModelConfig(data?.textModelConfig, providers)
+  let vision = normalizeModelConfig(data?.visionModelConfig, providers)
+
+  const oldProviders = Array.isArray(data?.providers) ? data.providers : []
+  if (oldProviders.length) {
+    const active = oldProviders.find(p => p.id === data?.activeProviderId) || oldProviders[0]
+    if (!data?.textModelConfig && active?.model) {
+      text = { providerId: active.id, model: active.model }
+    }
+    if (!data?.visionModelConfig) {
+      const vp = oldProviders.find(p => p.visionModel)
+      vision = vp
+        ? { providerId: vp.id, model: vp.visionModel }
+        : { providerId: text.providerId, model: '' }
+    }
+  }
+  return { text, vision }
+}
+
 export const useSettingsStore = defineStore('settings', () => {
   const providers = ref([])
-  const activeProviderId = ref('')
+  // 文本模型配置与视觉模型配置：各自独立选择（供应商可共用，模型可不同）
+  const textModelConfig = ref({ providerId: '', model: '' })
+  const visionModelConfig = ref({ providerId: '', model: '' })
   const theme = ref('system')
   const maxConcurrency = ref(DEFAULT_MAX_CONCURRENCY)
   const basicInfoMaxTokens = ref(DEFAULT_BASIC_INFO_MAX_TOKENS)
@@ -111,13 +148,14 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  const activeProvider = computed(() =>
-    providers.value.find(p => p.id === activeProviderId.value) || null
+  // 文本模型当前使用的供应商
+  const textProvider = computed(() =>
+    providers.value.find(p => p.id === textModelConfig.value.providerId) || null
   )
-  // 兼容 ai.js 等调用方：始终指向当前激活供应商的配置
-  const aiEndpoint = computed(() => activeProvider.value?.endpoint || '')
-  const aiApiKey = computed(() => activeProvider.value?.apiKey || '')
-  const aiModel = computed(() => activeProvider.value?.model || '')
+  // 视觉模型当前使用的供应商
+  const visionProvider = computed(() =>
+    providers.value.find(p => p.id === visionModelConfig.value.providerId) || null
+  )
 
   const isDark = computed(() => {
     if (theme.value === 'system') return systemPrefersDark()
@@ -146,6 +184,7 @@ export const useSettingsStore = defineStore('settings', () => {
   function applyFontSize() {
     const v = toPositiveNumber(fontSize.value, DEFAULT_FONT_SIZE)
     const clamped = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, v))
+    // 直接以百分比设置根字号；界面默认效果（旧版 175%）已由 style.css 的文字刻度承担
     document.documentElement.style.fontSize = clamped + '%'
   }
 
@@ -154,11 +193,7 @@ export const useSettingsStore = defineStore('settings', () => {
     applyTheme()
   }
 
-  function setActiveProvider(id) {
-    if (providers.value.some(p => p.id === id)) {
-      activeProviderId.value = id
-    }
-  }
+  // ---- 供应商管理（共享资源池） ----
 
   function addCustomProvider() {
     const customCount = providers.value.filter(p => !p.preset).length
@@ -167,11 +202,9 @@ export const useSettingsStore = defineStore('settings', () => {
       name: `自定义供应商 ${customCount + 1}`,
       preset: null,
       endpoint: '',
-      model: '',
       apiKey: ''
     }
     providers.value.push(provider)
-    activeProviderId.value = provider.id
     return provider
   }
 
@@ -179,9 +212,29 @@ export const useSettingsStore = defineStore('settings', () => {
     const index = providers.value.findIndex(p => p.id === id)
     if (index === -1) return
     providers.value.splice(index, 1)
-    if (activeProviderId.value === id) {
-      activeProviderId.value = providers.value[0]?.id || ''
+    const fallbackId = providers.value[0]?.id || ''
+    if (textModelConfig.value.providerId === id) {
+      textModelConfig.value.providerId = fallbackId
     }
+    if (visionModelConfig.value.providerId === id) {
+      visionModelConfig.value.providerId = fallbackId
+    }
+  }
+
+  // ---- 模型配置（供 UI 直接读写） ----
+
+  function setTextModel(providerId, model) {
+    const pid = providers.value.some(p => p.id === providerId)
+      ? providerId
+      : textModelConfig.value.providerId
+    textModelConfig.value = { providerId: pid, model: model || '' }
+  }
+
+  function setVisionModel(providerId, model) {
+    const pid = providers.value.some(p => p.id === providerId)
+      ? providerId
+      : visionModelConfig.value.providerId
+    visionModelConfig.value = { providerId: pid, model: model || '' }
   }
 
   function loadSettings() {
@@ -195,9 +248,18 @@ export const useSettingsStore = defineStore('settings', () => {
       if (!providers.value.length) {
         providers.value = [createPresetProvider('deepseek')]
       }
-      activeProviderId.value = providers.value.some(p => p.id === data.activeProviderId)
-        ? data.activeProviderId
-        : providers.value[0]?.id || ''
+
+      const { text, vision } = resolveModelConfigs(data, providers.value)
+      textModelConfig.value = text
+      visionModelConfig.value = vision
+
+      // 全新用户：文本模型使用预设默认模型名
+      if (!textModelConfig.value.model) {
+        const p = providers.value.find(x => x.id === textModelConfig.value.providerId)
+        if (p?.preset && PRESET_PROVIDERS[p.preset]) {
+          textModelConfig.value.model = PRESET_PROVIDERS[p.preset].model
+        }
+      }
 
       if (THEMES.includes(data.theme)) {
         theme.value = data.theme
@@ -217,7 +279,12 @@ export const useSettingsStore = defineStore('settings', () => {
       console.error('加载设置失败:', e)
       if (!providers.value.length) {
         providers.value = [createPresetProvider('deepseek')]
-        activeProviderId.value = providers.value[0].id
+      }
+      if (!textModelConfig.value.providerId) {
+        textModelConfig.value = { providerId: providers.value[0]?.id || '', model: '' }
+      }
+      if (!visionModelConfig.value.providerId) {
+        visionModelConfig.value = { providerId: providers.value[0]?.id || '', model: '' }
       }
     }
     applyTheme()
@@ -228,7 +295,8 @@ export const useSettingsStore = defineStore('settings', () => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         providers: providers.value,
-        activeProviderId: activeProviderId.value,
+        textModelConfig: textModelConfig.value,
+        visionModelConfig: visionModelConfig.value,
         theme: theme.value,
         maxConcurrency: maxConcurrency.value,
         basicInfoMaxTokens: basicInfoMaxTokens.value,
@@ -246,14 +314,16 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  /** 文本模型是否已配置（供应商 endpoint + apiKey 齐全） */
   function isConfigured() {
-    return !!(aiEndpoint.value && aiApiKey.value)
+    return !!(textProvider.value?.endpoint && textProvider.value?.apiKey)
   }
 
   function exportSettings() {
     return {
       providers: providers.value,
-      activeProviderId: activeProviderId.value,
+      textModelConfig: textModelConfig.value,
+      visionModelConfig: visionModelConfig.value,
       theme: theme.value,
       maxConcurrency: maxConcurrency.value,
       basicInfoMaxTokens: basicInfoMaxTokens.value,
@@ -271,10 +341,11 @@ export const useSettingsStore = defineStore('settings', () => {
   function importSettings(data) {
     if (Array.isArray(data.providers) && data.providers.length) {
       providers.value = data.providers.map(normalizeProvider).filter(Boolean)
-      activeProviderId.value = providers.value.some(p => p.id === data.activeProviderId)
-        ? data.activeProviderId
-        : providers.value[0]?.id || ''
     }
+    const { text, vision } = resolveModelConfigs(data, providers.value)
+    textModelConfig.value = text
+    visionModelConfig.value = vision
+
     if (THEMES.includes(data.theme)) theme.value = data.theme
     if (data.maxConcurrency !== undefined) maxConcurrency.value = toPositiveNumber(data.maxConcurrency, DEFAULT_MAX_CONCURRENCY)
     if (data.basicInfoMaxTokens !== undefined) basicInfoMaxTokens.value = toPositiveNumber(data.basicInfoMaxTokens, DEFAULT_BASIC_INFO_MAX_TOKENS)
@@ -374,7 +445,7 @@ export const useSettingsStore = defineStore('settings', () => {
   loadSettings()
   loadSyncTimes()
 
-  watch([providers, activeProviderId, theme, fontSize, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
+  watch([providers, textModelConfig, visionModelConfig, theme, fontSize, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
     if (silentApply) return
     applyFontSize()
     saveSettings()
@@ -383,11 +454,10 @@ export const useSettingsStore = defineStore('settings', () => {
 
   return {
     providers,
-    activeProviderId,
-    activeProvider,
-    aiEndpoint,
-    aiApiKey,
-    aiModel,
+    textModelConfig,
+    visionModelConfig,
+    textProvider,
+    visionProvider,
     theme,
     maxConcurrency,
     basicInfoMaxTokens,
@@ -400,9 +470,10 @@ export const useSettingsStore = defineStore('settings', () => {
     debugMode,
     fontSize,
     isDark,
-    setActiveProvider,
     addCustomProvider,
     removeProvider,
+    setTextModel,
+    setVisionModel,
     loadSettings,
     saveSettings,
     isConfigured,

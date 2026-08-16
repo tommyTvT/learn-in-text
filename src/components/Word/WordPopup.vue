@@ -246,7 +246,7 @@ function handleResize() {
           'transition-transform duration-300 ease-out',
           entering || closing ? 'translate-y-full' : 'translate-y-0'
         ]
-      : 'rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 w-64 max-h-[75vh] overflow-y-auto transition-[left,top,opacity] duration-150'"
+      : 'rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 w-80 max-h-[75vh] overflow-y-auto transition-[left,top,opacity] duration-150'"
     :style="isMobile ? {} : popupStyle"
   >
     <div class="flex justify-center pt-2 sm:hidden">

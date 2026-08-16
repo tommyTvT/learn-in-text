@@ -47,24 +47,24 @@ onMounted(async () => {
 <template>
   <div class="min-h-[70vh] flex items-center justify-center">
     <div class="w-full max-w-md px-4">
-      <div class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-gray-200 dark:border-neutral-800 p-8 text-center">
+      <div class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-gray-200 dark:border-neutral-800 p-6 text-center">
         <!-- 加载中 -->
         <div v-if="status === 'loading'">
           <LoaderCircle class="w-14 h-14 mx-auto text-blue-500 animate-spin" />
-          <h1 class="mt-4 text-xl font-bold text-gray-900 dark:text-neutral-100">正在验证邮箱...</h1>
+          <h1 class="mt-4 text-lg font-bold text-gray-900 dark:text-neutral-100">正在验证邮箱...</h1>
         </div>
 
         <!-- 验证成功 -->
         <div v-else-if="status === 'success'">
           <CheckCircle2 class="w-14 h-14 mx-auto text-green-500" />
-          <h1 class="mt-4 text-xl font-bold text-gray-900 dark:text-neutral-100">邮箱验证成功</h1>
+          <h1 class="mt-4 text-lg font-bold text-gray-900 dark:text-neutral-100">邮箱验证成功</h1>
           <p class="mt-2 text-sm text-gray-500 dark:text-neutral-400">{{ message }}</p>
         </div>
 
         <!-- 验证失败 -->
         <div v-else>
           <XCircle class="w-14 h-14 mx-auto text-red-500" />
-          <h1 class="mt-4 text-xl font-bold text-gray-900 dark:text-neutral-100">邮箱验证未完成</h1>
+          <h1 class="mt-4 text-lg font-bold text-gray-900 dark:text-neutral-100">邮箱验证未完成</h1>
           <p class="mt-2 text-sm text-gray-500 dark:text-neutral-400">{{ message }}</p>
           <router-link
             to="/login"

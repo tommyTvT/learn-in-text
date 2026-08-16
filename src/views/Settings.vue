@@ -1,23 +1,21 @@
-﻿<script setup>
+<script setup>
 import { ref, computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useSettingsStore } from '../stores/settings'
 import { useAuthStore } from '../stores/auth'
-import { testConnection } from '../services/ai'
 import { exportService } from '../services/db'
 import { testConnection as testCloudConnection, syncNow, clearCloud } from '../services/sync'
 import { lastSyncState, setLastSyncState } from '../services/autoSync'
 import AIConfigModal from '../components/AI/AIConfigModal.vue'
+import ModelConfigModal from '../components/AI/ModelConfigModal.vue'
 
 const settingsStore = useSettingsStore()
 const authStore = useAuthStore()
 
 const isLoggedIn = computed(() => authStore.isLoggedIn)
 
-const activeProvider = computed(() => settingsStore.activeProvider)
 const aiConfigOpen = ref(false)
-const testing = ref(false)
-const testResult = ref(null)
+const modelConfigType = ref(null)
 const exporting = ref(false)
 const importing = ref(false)
 const showDevOptions = ref(false)
@@ -108,18 +106,6 @@ async function handleLogout() {
   await authStore.logout()
 }
 
-async function handleTestConnection() {
-  testing.value = true
-  testResult.value = null
-  try {
-    testResult.value = await testConnection()
-  } catch (error) {
-    testResult.value = { success: false, message: error.message }
-  } finally {
-    testing.value = false
-  }
-}
-
 async function exportAllData() {
   exporting.value = true
   try {
@@ -188,13 +174,13 @@ onMounted(() => {
 
 <template>
   <div>
-    <div class="mb-6">
-      <h1 class="text-3xl font-bold text-gray-900 dark:text-neutral-100 mb-2">设置</h1>
-      <p class="text-gray-600 dark:text-neutral-400">配置AI接口和其他设置</p>
+    <div class="mb-4">
+      <h1 class="text-xl font-bold text-gray-900 dark:text-neutral-100 mb-1.5">设置</h1>
+      <p class="text-gray-600 dark:text-neutral-400 text-sm">配置AI接口和其他设置</p>
     </div>
 
     <!-- 用户信息 -->
-    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 mb-6">
+    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 mb-5">
       <template v-if="isLoggedIn">
         <div class="flex items-center justify-between gap-4">
           <div class="flex items-center gap-3">
@@ -237,8 +223,8 @@ onMounted(() => {
       </template>
     </div>
 
-    <div class="space-y-6">
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+    <div class="space-y-5">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">外观</h2>
         <p class="text-sm text-gray-600 dark:text-neutral-400 mb-4">
           选择界面主题，默认跟随系统偏好
@@ -277,109 +263,97 @@ onMounted(() => {
             </button>
           </div>
           <div class="flex items-center gap-3">
-            <input
-              type="range"
-              min="60"
-              max="200"
-              step="1"
-              v-model.number="settingsStore.fontSize"
-              class="flex-1 accent-blue-600 cursor-pointer"
-            />
+            <div class="flex-1 min-w-0">
+              <input
+                type="range"
+                min="60"
+                max="200"
+                step="1"
+                v-model.number="settingsStore.fontSize"
+                class="w-full accent-blue-600 cursor-pointer"
+              />
+              <!-- 刻度必须与滑块轨道同容器：100 在 60~200 区间的真实位置是
+                   (100-60)/(200-60)≈28.6%，而非等分中点（50% 处对应的是 130）；
+                   且旧版刻度行宽度包含了右侧数值框，标签被推到轨道 ~63% 处，
+                   导致拖到 “100%” 标签处实际得到 ≈145。 -->
+              <div class="relative mt-1 text-xs text-gray-400 dark:text-neutral-500">
+                <span class="invisible">100%</span>
+                <span class="absolute left-0 top-0">60%</span>
+                <span class="absolute left-[28.57%] -translate-x-1/2 top-0">100%</span>
+                <span class="absolute right-0 top-0">200%</span>
+              </div>
+            </div>
             <div class="flex items-center gap-1 shrink-0">
+              <!-- 隐藏 number 原生 spinner（会挤占右侧空间遮挡数字，且滑块/重置已足够调节），
+                   并加宽至 w-20 确保 200% 根字号下 "200" 也能完整显示 -->
               <input
                 type="number"
                 min="60"
                 max="200"
                 step="1"
                 v-model.number="settingsStore.fontSize"
-                class="w-16 px-2 py-1 text-sm text-center border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                class="w-20 px-2 py-1 text-sm text-center border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 [appearance:textfield] [-moz-appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
               />
               <span class="text-xs text-gray-500 dark:text-neutral-400">%</span>
             </div>
           </div>
-          <div class="flex justify-between text-xs text-gray-400 dark:text-neutral-500 mt-1">
-            <span>60%</span>
-            <span>100%</span>
-            <span>200%</span>
-          </div>
         </div>
       </div>
 
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <div class="flex items-center justify-between gap-3 mb-4">
           <div>
             <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100">AI 接口配置</h2>
             <p class="text-sm text-gray-600 dark:text-neutral-400 mt-1">
-              支持多个供应商随时切换。配置供应商与模型在弹窗内完成。
+              供应商为共享资源，文本模型与视觉模型可分别选用供应商与模型
             </p>
           </div>
           <button
             @click="aiConfigOpen = true"
-            class="shrink-0 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
+            class="shrink-0 px-4 py-2 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700 transition-colors font-medium"
           >
-            配置
+            管理供应商
           </button>
         </div>
 
         <div class="space-y-4">
-          <!-- 当前激活供应商概览 -->
-          <div
-            class="rounded-lg border border-gray-200 dark:border-neutral-800 bg-gray-50 dark:bg-neutral-800/60 p-4"
-          >
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0">
-                <div class="text-xs text-gray-500 dark:text-neutral-400 mb-1">当前使用的供应商</div>
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="font-medium text-gray-900 dark:text-neutral-100">
-                    {{ activeProvider?.name || '未选择' }}
-                  </span>
-                  <span
-                    :class="[
-                      'shrink-0 text-xs px-2 py-0.5 rounded-full',
-                      activeProvider?.apiKey
-                        ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
-                        : 'bg-gray-100 text-gray-500 dark:bg-neutral-700 dark:text-neutral-400'
-                    ]"
-                  >
-                    {{ activeProvider?.apiKey ? '已配置' : '未配置 Key' }}
-                  </span>
-                </div>
-              </div>
-              <div class="text-right shrink-0">
-                <div class="text-xs text-gray-500 dark:text-neutral-400 mb-1">当前模型</div>
-                <div class="text-sm font-medium text-gray-900 dark:text-neutral-100 max-w-[10rem] sm:max-w-xs truncate">
-                  {{ activeProvider?.model || '未设置模型' }}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="flex items-center space-x-3">
+          <!-- 两个模型设置入口 -->
+          <div class="grid gap-3 sm:grid-cols-2">
             <button
-              @click="handleTestConnection"
-              :disabled="testing || !settingsStore.aiEndpoint || !settingsStore.aiApiKey"
-              class="px-4 py-2 bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              @click="modelConfigType = 'text'"
+              class="text-left rounded-lg border border-gray-200 dark:border-neutral-800 bg-gray-50 dark:bg-neutral-800/60 p-4 hover:border-blue-400 hover:bg-blue-50 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
             >
-              {{ testing ? '测试中...' : '测试连接' }}
+              <div class="flex items-center justify-between">
+                <span class="text-sm font-medium text-gray-900 dark:text-neutral-100">文本模型</span>
+                <svg class="w-4 h-4 text-gray-400 dark:text-neutral-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
+              <div class="text-xs text-gray-500 dark:text-neutral-400 mt-1.5 truncate">
+                {{ settingsStore.textProvider?.name || '未选择供应商' }} · {{ settingsStore.textModelConfig.model || '未设置模型' }}
+              </div>
             </button>
-            <span class="text-xs text-gray-400 dark:text-neutral-500">
-              测试当前所选供应商与模型的连接
-            </span>
+
+            <button
+              @click="modelConfigType = 'vision'"
+              class="text-left rounded-lg border border-gray-200 dark:border-neutral-800 bg-gray-50 dark:bg-neutral-800/60 p-4 hover:border-purple-400 hover:bg-purple-50 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+            >
+              <div class="flex items-center justify-between">
+                <span class="text-sm font-medium text-gray-900 dark:text-neutral-100">视觉模型</span>
+                <svg class="w-4 h-4 text-gray-400 dark:text-neutral-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                </svg>
+              </div>
+              <div class="text-xs text-gray-500 dark:text-neutral-400 mt-1.5 truncate">
+                {{ settingsStore.visionProvider?.name || '未选择供应商' }} · {{ settingsStore.visionModelConfig.model || '跟随文本模型' }}
+              </div>
+            </button>
           </div>
 
-          <div
-            v-if="testResult"
-            :class="[
-              'p-3 rounded-md text-sm',
-              testResult.success ? 'bg-green-50 dark:bg-neutral-800 text-green-800 dark:text-green-400' : 'bg-red-50 dark:bg-neutral-800 text-red-800 dark:text-red-400'
-            ]"
-          >
-            {{ testResult.message }}
-          </div>
         </div>
       </div>
 
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">云同步</h2>
 
         <div class="space-y-4">
@@ -467,7 +441,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-6">
+      <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <button
           @click="showDevOptions = !showDevOptions"
           class="flex items-center justify-between w-full"
@@ -647,5 +621,11 @@ onMounted(() => {
 
     <!-- AI 配置弹窗 -->
     <AIConfigModal :open="aiConfigOpen" @close="aiConfigOpen = false" />
+    <ModelConfigModal
+      v-if="modelConfigType"
+      :open="true"
+      :type="modelConfigType"
+      @close="modelConfigType = null"
+    />
   </div>
 </template>

@@ -2,10 +2,38 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-:root {
+/* ============================================================
+   全局文字刻度：界面元素的字号已直接按「旧版 175% 的效果」写入
+   （即根字号保持 100%=16px 时各 text-* 工具类的实际像素值）。
+   这样设置页默认值 100 即可呈现旧版 175% 的放大阅读效果；
+   用户在设置页拖动滑块时，根字号 % 变化会在此基准上进一步等比
+   缩放所有 rem 尺寸。
+   - 正文类（xs/sm/base）精确对应旧版 175% 的像素（×1.75）
+   - 标题类（lg~3xl）相对收窄，避免大标题过大不协调
+   ============================================================ */
+@theme {
+  /*            字号          行高      （旧版 175% 下像素） */
+  --text-xs:   1.3125rem;  /* 21px      12px×1.75 */
+  --text-xs--line-height: 1.875rem;
+  --text-sm:   1.5rem;     /* 24px      14px×1.75 */
+  --text-sm--line-height: 2.125rem;
+  --text-base: 1.75rem;    /* 28px      16px×1.75（正文基准） */
+  --text-base--line-height: 2.5rem;
+  --text-lg:   1.875rem;   /* 30px      18px×1.75≈31.5，收窄 */
+  --text-lg--line-height: 2.625rem;
+  --text-xl:   2rem;       /* 32px      20px×1.75=35，收窄 */
+  --text-xl--line-height: 2.75rem;
+  --text-2xl:  2.25rem;    /* 36px      24px×1.75=42，收窄 */
+  --text-2xl--line-height: 3rem;
+  --text-3xl:  2.5rem;     /* 40px      30px×1.75=52.5，大幅收窄 */
+  --text-3xl--line-height: 3.25rem;
+}
+
+::root {
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  /* 根字号默认 100%，由用户在设置页调整后通过 inline style 覆盖。
-     所有基于 rem 的 Tailwind text-* 工具类会同步等比缩放。 */
+  /* 根字号默认 100%（=16px）。界面默认即呈现旧版 175% 的放大效果，
+     因为 @theme 已把各 text-* 的 rem 值按 ×1.75 写死。
+     用户在设置页调整后通过 inline style 覆盖此值，等比缩放所有 rem 尺寸。 */
   font-size: 100%;
   line-height: 1.5;
   font-weight: 400;
@@ -18,6 +46,8 @@
 }
 
 body {
+  /* 未显式指定 text-* 的正文（如文章阅读内容）也按 175 效果的基准字号渲染 */
+  font-size: var(--text-base);
   margin: 0;
   min-height: 100dvh;
   /* 始终保留纵向滚动条占位，避免页面切换时滚动条出现/消失造成的宽度跳动与违和感 */
