@@ -248,6 +248,119 @@ export function getWordContext(text, word, maxWords = 0, occurrence = 0) {
   return context
 }
 
+// 句子边界：句末标点(.!?)及其后的引号/括号（后跟空白或文末），或引语前的冒号（后跟空白）
+// 供“单词在文中翻译”与“划词翻译语境提取”共用，避免两处规则漂移
+export const SENTENCE_BOUNDARY_REGEX = /[.!?]+["')\]]*(?=\s|$)|:(?=\s)/g
+
+// 提取目标词所在句子及前后语境，用于“在文中”翻译：
+// sentence 为目标词所在的单句（限定翻译输出范围，保证显示简短），
+// context 额外带上前后各 extraSentences 句（传给 AI 帮助其贴合语境理解）
+export function getWordSentenceWithContext(text, word, occurrence = 0, extraSentences = 1) {
+  const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
+  let match
+  let count = 0
+  let wordIndex = -1
+  while ((match = wordRegex.exec(text)) !== null) {
+    if (count === occurrence) {
+      wordIndex = match.index
+      break
+    }
+    count++
+  }
+  if (wordIndex < 0) return { sentence: '', context: '' }
+
+  // 共享的带 g 标志正则有 lastIndex 状态，使用前重置
+  SENTENCE_BOUNDARY_REGEX.lastIndex = 0
+  const sentences = []
+  let start = 0
+  let b
+  while ((b = SENTENCE_BOUNDARY_REGEX.exec(text)) !== null) {
+    const end = b.index + b[0].length
+    const piece = text.slice(start, end).trim()
+    if (piece) sentences.push({ start, end, text: piece })
+    start = end
+  }
+  if (start < text.length) {
+    const piece = text.slice(start).trim()
+    if (piece) sentences.push({ start, end: text.length, text: piece })
+  }
+
+  const targetIdx = sentences.findIndex(s => wordIndex >= s.start && wordIndex < s.end)
+  if (targetIdx < 0) return { sentence: '', context: '' }
+
+  const sentence = sentences[targetIdx].text
+  const from = Math.max(0, targetIdx - extraSentences)
+  const to = Math.min(sentences.length - 1, targetIdx + extraSentences)
+  const context = sentences.slice(from, to + 1).map(s => s.text).join(' ')
+  return { sentence, context }
+}
+
+// 划词翻译：选中文本的规范化（小写 + 空白折叠 + trim），
+// 兼容跨段落选择时 selection.toString() 与原文空白形态不一致的差异
+export function normalizeSelectionText(text) {
+  return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim()
+}
+
+// 划词翻译：定位选中文本在原文中的位置，返回其所在句前后各 extraSentences 句的语境。
+// 定位失败（如选区与原文不一致）返回空串，翻译降级为无语境，功能不中断。
+export function getSelectionContext(fullText, selection, extraSentences = 1) {
+  const source = String(fullText || '')
+  const needle = normalizeSelectionText(selection)
+  if (!source || !needle) return ''
+
+  // 原文按同策略归一化（空白折叠为单空格），并保留「折叠文本索引 → 原文索引」映射，
+  // 使跨段落选择（选区字符串与原文空白形态不一致）也能定位
+  let folded = ''
+  const indexMap = []
+  let i = 0
+  while (i < source.length) {
+    if (/\s/.test(source[i])) {
+      folded += ' '
+      indexMap.push(i)
+      while (i < source.length && /\s/.test(source[i])) i++
+    } else {
+      folded += source[i].toLowerCase()
+      indexMap.push(i)
+      i++
+    }
+  }
+  const pos = folded.indexOf(needle)
+  if (pos < 0 || pos + needle.length > indexMap.length) return ''
+
+  const startIdx = indexMap[pos]
+  const endIdx = indexMap[pos + needle.length - 1] + 1
+
+  SENTENCE_BOUNDARY_REGEX.lastIndex = 0
+  const sentences = []
+  let s = 0
+  let b
+  while ((b = SENTENCE_BOUNDARY_REGEX.exec(source)) !== null) {
+    const end = b.index + b[0].length
+    const piece = source.slice(s, end).trim()
+    if (piece) sentences.push({ start: s, end, text: piece })
+    s = end
+  }
+  if (s < source.length) {
+    const piece = source.slice(s).trim()
+    if (piece) sentences.push({ start: s, end: source.length, text: piece })
+  }
+
+  // 选中片段可与多句相交：取首个与末个相交句作锚点，语境前后各扩 extraSentences 句，保证完整覆盖选区
+  let targetIdx = -1
+  let lastIdx = -1
+  for (let i = 0; i < sentences.length; i++) {
+    if (startIdx < sentences[i].end && endIdx > sentences[i].start) {
+      if (targetIdx < 0) targetIdx = i
+      lastIdx = i
+    }
+  }
+  if (targetIdx < 0) return ''
+
+  const from = Math.max(0, targetIdx - extraSentences)
+  const to = Math.min(sentences.length - 1, lastIdx + extraSentences)
+  return sentences.slice(from, to + 1).map(x => x.text).join(' ')
+}
+
 export function getAllOccKeys(text) {
   const keys = []
   const counts = {}

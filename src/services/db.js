@@ -17,6 +17,16 @@ db.version(6).stores({
   tombstones: '++id, &[table+key], table, key, createdAt'
 })
 
+// v7：新增划词翻译缓存表（按 文章 + 选区哈希 唯一）
+db.version(7).stores({
+  articles: '++id, title, content, createdAt, updatedAt',
+  words: '++id, &[word+articleId], word, articleId, definitions, examples, source, updatedAt',
+  wordMarks: '++id, articleId, wordId, occKey, [articleId+wordId], [articleId+occKey], createdAt',
+  contextTranslations: '++id, wordId, articleId, occKey, &[wordId+articleId+occKey], translation, createdAt',
+  selectionTranslations: '++id, articleId, selectionHash, &[articleId+selectionHash]',
+  tombstones: '++id, &[table+key], table, key, createdAt'
+})
+
 async function ensureSchema() {
   try {
     await db.open()
@@ -63,6 +73,19 @@ export function tombstoneKey(table, r) {
     default:
       return ''
   }
+}
+
+/**
+ * 划词翻译缓存键：选中文本规范化（小写 + 空白折叠 + trim）后的 djb2 哈希（36 进制）。
+ * 哈希碰撞概率极低，读取缓存时再比对存储的 text 二次校验。
+ */
+export function selectionHash(text) {
+  const normalized = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim()
+  let h = 5381
+  for (let i = 0; i < normalized.length; i++) {
+    h = ((h << 5) + h + normalized.charCodeAt(i)) | 0
+  }
+  return (h >>> 0).toString(36)
 }
 
 /** 记录一次本地删除事实（tombstone），供云端同步做删除传播。 */
@@ -134,9 +157,10 @@ export const articleService = {
   async delete(id) {
     const article = await db.articles.get(id)
     if (!article) return
-    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.tombstones, async () => {
+    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.selectionTranslations, db.tombstones, async () => {
       await db.wordMarks.where('articleId').equals(id).delete()
       await db.contextTranslations.where('articleId').equals(id).delete()
+      await db.selectionTranslations.where('articleId').equals(id).delete()
       await db.words.where('articleId').equals(id).delete()
       await db.articles.delete(id)
       await recordTombstone('articles', article)
@@ -407,6 +431,29 @@ export const contextTranslationService = {
   }
 }
 
+export const selectionTranslationService = {
+  async get(articleId, hash) {
+    return await db.selectionTranslations.where({ articleId, selectionHash: hash }).first()
+  },
+
+  async set(articleId, hash, text, translation) {
+    const existing = await db.selectionTranslations.where({ articleId, selectionHash: hash }).first()
+    if (existing) {
+      await db.selectionTranslations.update(existing.id, { text, translation, updatedAt: new Date() })
+      return await db.selectionTranslations.get(existing.id)
+    }
+    const id = await db.selectionTranslations.add({
+      articleId,
+      selectionHash: hash,
+      text,
+      translation,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    })
+    return await db.selectionTranslations.get(id)
+  }
+}
+
 export const exportService = {
   async exportArticle(articleId) {
     const article = await db.articles.get(articleId)
@@ -504,6 +551,7 @@ export const exportService = {
     const words = await db.words.toArray()
     const wordMarks = await db.wordMarks.toArray()
     const contextTranslations = await db.contextTranslations.toArray()
+    const selectionTranslations = await db.selectionTranslations.toArray()
 
     return {
       version: 2,
@@ -513,7 +561,8 @@ export const exportService = {
         articles: articles.map(({ id, ...rest }) => rest),
         words: words.map(({ id, phonetic, ...rest }) => rest),
         wordMarks: wordMarks.map(({ id, ...rest }) => rest),
-        contextTranslations: contextTranslations.map(({ id, ...rest }) => rest)
+        contextTranslations: contextTranslations.map(({ id, ...rest }) => rest),
+        selectionTranslations: selectionTranslations.map(({ id, ...rest }) => rest)
       }
     }
   },
@@ -523,10 +572,10 @@ export const exportService = {
       throw new Error('不是全量备份文件')
     }
 
-    const { articles, words, wordMarks, contextTranslations } = data.data
-    const stats = { articles: 0, words: 0, marks: 0, translations: 0, skipped: 0 }
+    const { articles, words, wordMarks, contextTranslations, selectionTranslations } = data.data
+    const stats = { articles: 0, words: 0, marks: 0, translations: 0, selectionTranslations: 0, skipped: 0 }
 
-    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, async () => {
+    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.selectionTranslations, async () => {
       const existingArticles = await db.articles.toArray()
       const articleUidMap = {}
       existingArticles.forEach(a => { if (a.uid) articleUidMap[a.uid] = a.id })
@@ -618,17 +667,40 @@ export const exportService = {
           }
         }
       }
+
+      // 划词翻译缓存（旧备份无此字段时降级为空数组，兼容不报错）
+      const existingSelectionTranslations = await db.selectionTranslations.toArray()
+      const selectionSet = new Set(existingSelectionTranslations.map(t => `${t.articleId}_${t.selectionHash}`))
+
+      for (const t of (selectionTranslations || [])) {
+        const articleId = articleIdMap[t.articleId]
+        if (articleId == null) continue
+        const key = `${articleId}_${t.selectionHash}`
+        if (!selectionSet.has(key)) {
+          await db.selectionTranslations.add({
+            articleId,
+            selectionHash: t.selectionHash,
+            text: t.text || '',
+            translation: t.translation || '',
+            createdAt: t.createdAt || new Date(),
+            updatedAt: t.updatedAt || new Date()
+          })
+          selectionSet.add(key)
+          stats.selectionTranslations++
+        }
+      }
     })
 
     return stats
   },
 
   async clearAllData() {
-    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, async () => {
+    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.selectionTranslations, async () => {
       await db.articles.clear()
       await db.words.clear()
       await db.wordMarks.clear()
       await db.contextTranslations.clear()
+      await db.selectionTranslations.clear()
     })
   },
 
@@ -637,7 +709,8 @@ export const exportService = {
       articles: await db.articles.count(),
       words: await db.words.count(),
       wordMarks: await db.wordMarks.count(),
-      contextTranslations: await db.contextTranslations.count()
+      contextTranslations: await db.contextTranslations.count(),
+      selectionTranslations: await db.selectionTranslations.count()
     }
   },
 

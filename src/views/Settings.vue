@@ -350,6 +350,35 @@ onMounted(() => {
             </button>
           </div>
 
+          <!-- 划词翻译开关 -->
+          <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">划词翻译</h3>
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  开启后，阅读页拖选文字可翻译词句，译文下方可追问语法解析。关闭后不再显示选区翻译气泡。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="settingsStore.enableSelectionTranslation"
+                @click="settingsStore.enableSelectionTranslation = !settingsStore.enableSelectionTranslation"
+                :class="[
+                  'relative w-11 h-6 rounded-full transition-colors shrink-0',
+                  settingsStore.enableSelectionTranslation ? 'bg-blue-600' : 'bg-gray-300 dark:bg-neutral-700'
+                ]"
+              >
+                <span
+                  :class="[
+                    'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                    settingsStore.enableSelectionTranslation ? 'translate-x-5' : ''
+                  ]"
+                />
+              </button>
+            </div>
+          </div>
+
         </div>
       </div>
 
@@ -486,6 +515,7 @@ onMounted(() => {
               <div class="text-gray-600 dark:text-neutral-400">单词数量：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ dataStats.words }}</span></div>
               <div class="text-gray-600 dark:text-neutral-400">标记记录：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ dataStats.wordMarks }}</span></div>
               <div class="text-gray-600 dark:text-neutral-400">翻译记录：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ dataStats.contextTranslations }}</span></div>
+              <div class="text-gray-600 dark:text-neutral-400">划词翻译记录：<span class="font-medium text-gray-900 dark:text-neutral-100">{{ dataStats.selectionTranslations }}</span></div>
             </div>
             <button
               @click="loadStats"
@@ -557,6 +587,30 @@ onMounted(() => {
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
                   文章生成请求允许生成的最大 token 数
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">划词翻译 max_tokens</label>
+                <input
+                  v-model.number="settingsStore.selectionMaxTokens"
+                  type="number"
+                  min="1"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  拖选文字翻译请求允许生成的最大 token 数
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">追问解析 max_tokens</label>
+                <input
+                  v-model.number="settingsStore.selectionChatMaxTokens"
+                  type="number"
+                  min="1"
+                  class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  划词追问对话请求允许生成的最大 token 数
                 </p>
               </div>
             </div>

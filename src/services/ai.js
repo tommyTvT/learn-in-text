@@ -117,11 +117,14 @@ function estimateTokens(text) {
  * @param {object} params 请求参数（不含 stream，内部自动加 stream: true）
  * @param {string} type 模型类型（text / vision）
  * @param {(delta: string, full: string) => void} onDelta 每收到一段增量时回调（增量, 累计全文）
+ * @param {AbortSignal} signal 外部中止信号（如关闭窗口时 abort）
  */
-async function streamChatCompletion(params, type = 'text', onDelta) {
+async function streamChatCompletion(params, type = 'text', onDelta, signal) {
   const { baseURL, apiKey, timeoutMs } = getModelConfig(type)
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  const onOuterAbort = () => ctrl.abort()
+  signal?.addEventListener('abort', onOuterAbort)
   try {
     const res = await fetch(baseURL + '/chat/completions', {
       method: 'POST',
@@ -174,6 +177,7 @@ async function streamChatCompletion(params, type = 'text', onDelta) {
     return full
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', onOuterAbort)
   }
 }
 
@@ -228,30 +232,114 @@ export async function generateWordBasicInfo(word, context = '') {
   return JSON.parse(response.choices[0].message.content)
 }
 
-export async function generateWordContextTranslation(word, context) {
+export async function generateWordContextTranslation(word, sentence, context) {
   const model = getModel()
 
-  const systemMessage = `你是英语词典助手。将所提供的句子翻译成中文。
-翻译规则：必须用 **...** 双星号标记目标单词对应的中文翻译！
+  // 兜底：未提供目标句时退回整段上下文
+  if (!sentence) sentence = context || ''
+
+  const systemMessage = `你是英语词典助手。我会在用户消息中提供“完整语境”和“目标句”，只翻译目标句。
+翻译规则：
+1. 完整语境仅用于理解背景，禁止翻译或输出其中目标句以外的内容
+2. 必须用 **...** 双星号标记目标单词对应的中文翻译
 返回JSON格式：
 {
-  "contextTranslation": "完整翻译，目标词用**标记**"
+  "contextTranslation": "目标句的完整翻译，目标词用**标记**"
 }
 
 示例：
-- 单词 read，上下文 "I read an interesting book yesterday" → {"contextTranslation": "我昨天**读**了一本有趣的书"}`
+- 单词 read，完整语境 "Reading is my hobby. I read an interesting book yesterday. It was fun."，目标句 "I read an interesting book yesterday" → {"contextTranslation": "我昨天**读**了一本有趣的书"}`
+
+  const userMessage = context && context !== sentence
+    ? `完整语境（仅供理解背景，不要翻译）：\n"${context}"\n\n目标句（只需翻译这一句）：\n"${sentence}"\n\n请只翻译目标句，并标记单词 "${word}" 对应的中文`
+    : `句子："${sentence}"\n\n请翻译句子并标记单词 "${word}" 对应的中文`
 
   const response = await createChatCompletion(chatOptions({
     model,
     messages: [
       { role: 'system', content: systemMessage },
-      { role: 'user', content: `上下文："${context}"\n\n请翻译句子并标记单词 "${word}" 对应的中文` }
+      { role: 'user', content: userMessage }
     ],
     response_format: { type: 'json_object' },
     max_tokens: useSettingsStore().contextMaxTokens || 200
   }))
 
   return JSON.parse(response.choices[0].message.content)
+}
+
+/**
+ * 划词翻译：翻译用户选中的任意文本（单词/词组/句子/多句）。
+ * 沿用「传得多、翻得短」约束：语境仅供理解背景，只翻译选中文本。
+ * @param {string} selection 选中的待翻译文本
+ * @param {string} context 选中文本所在语境（可为空）
+ * @returns {Promise<{translation: string}>}
+ */
+export async function generateSelectionTranslation(selection, context = '') {
+  const model = getModel()
+
+  const systemMessage = `你是英语翻译助手。我会在用户消息中提供“完整语境”和“待翻译文本”，只翻译待翻译文本。
+翻译规则：
+1. 完整语境仅用于理解背景，禁止翻译或输出其中待翻译文本以外的内容
+2. 待翻译文本是单词或短语时，输出其词性、释义及在语境中的含义（如 "v. 读；阅读"）
+3. 待翻译文本是句子或多句时，输出自然流畅的中文翻译
+返回JSON格式：
+{
+  "translation": "译文"
+}`
+
+  const userMessage = context
+    ? `完整语境（仅供理解背景，不要翻译）：\n"${context}"\n\n待翻译文本（只需翻译）：\n"${selection}"`
+    : `待翻译文本：\n"${selection}"`
+
+  const response = await createChatCompletion(chatOptions({
+    model,
+    messages: [
+      { role: 'system', content: systemMessage },
+      { role: 'user', content: userMessage }
+    ],
+    response_format: { type: 'json_object' },
+    max_tokens: useSettingsStore().selectionMaxTokens || 500
+  }))
+
+  const parsed = parseJsonSafely(response.choices[0].message.content)
+  return { translation: String(parsed.translation || '').trim() }
+}
+
+/**
+ * 划词追问：针对选中文本的多轮对话式解析（语法结构、句子成分、时态语态等），流式输出。
+ * @param {Array<{role: 'user'|'assistant', content: string}>} history 对话历史（不含本轮问题）
+ * @param {string} text 选中的待解析文本
+ * @param {string} context 选中文本所在语境（仅供 AI 理解背景，可为空）
+ * @param {(delta: string, full: string) => void} onDelta 流式增量回调（增量, 累计全文）
+ * @param {AbortSignal} signal 外部中止信号（关闭窗口时 abort）
+ * @returns {Promise<string>} 完整回答文本
+ */
+export async function chatAboutSelection(history, text, context = '', onDelta, signal) {
+  const model = getModel()
+
+  const contextLine = context
+    ? `\n完整语境（仅供理解背景）："${context}"`
+    : ''
+  const systemMessage = `你是英语学习助教。用户正在精读一篇英语文章，会针对一段选中的文本提问（语法解析、句子结构、时态语态、词汇用法、翻译等）。
+待解析文本："${text}"${contextLine}
+回答要求：
+1. 使用中文回答，条理清晰，面向中国英语学习者
+2. 直接输出内容，不要使用 Markdown 表格、代码块；可用换行和“1. 2. 3.”编号分点，重点词句用 **加粗** 标记
+3. 解析语法时给出简明结构（主语/谓语/宾语对应关系）；讲解词组时给出含义和例句`
+
+  // 历史最多带最近 10 条，防止 token 膨胀（system 已含待解析文本）
+  const trimmedHistory = (history || [])
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && m.content)
+    .slice(-10)
+
+  return await streamChatCompletion(chatOptions({
+    model,
+    messages: [
+      { role: 'system', content: systemMessage },
+      ...trimmedHistory
+    ],
+    max_tokens: useSettingsStore().selectionChatMaxTokens || 1000
+  }), 'text', onDelta, signal)
 }
 
 export async function batchGenerateWords(words, onProgress, concurrency) {

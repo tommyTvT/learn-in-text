@@ -27,6 +27,10 @@ const DEFAULT_CONTEXT_MAX_TOKENS = 200
 const DEFAULT_ARTICLE_MAX_TOKENS = 2000
 const DEFAULT_REQUEST_TIMEOUT = 30
 const DEFAULT_AUTO_SYNC = true
+// 划词翻译（选区翻译 + 追问解析）
+const DEFAULT_ENABLE_SELECTION_TRANSLATION = true
+const DEFAULT_SELECTION_MAX_TOKENS = 500
+const DEFAULT_SELECTION_CHAT_MAX_TOKENS = 1000
 // 字体大小（百分比）：100% = 浏览器默认根字号（16px），由用户在设置页调整。
 // 界面元素的字号已直接按「旧版 175% 的效果」焊死在 CSS 值中
 // （见 style.css 的 @theme 文字刻度重定义），因此根字号保持 100% 时
@@ -125,6 +129,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const autoSync = ref(DEFAULT_AUTO_SYNC)
   const debugMode = ref(false)
   const fontSize = ref(DEFAULT_FONT_SIZE)
+  const enableSelectionTranslation = ref(DEFAULT_ENABLE_SELECTION_TRANSLATION)
+  const selectionMaxTokens = ref(DEFAULT_SELECTION_MAX_TOKENS)
+  const selectionChatMaxTokens = ref(DEFAULT_SELECTION_CHAT_MAX_TOKENS)
 
   // ---- 设置同步（LWW）状态 ----
   // 本地最后修改时间戳；应用云端设置时不计入「本地修改」，避免触发回传循环
@@ -275,6 +282,9 @@ export const useSettingsStore = defineStore('settings', () => {
       supabaseAnonKey.value = data.supabaseAnonKey || BUILTIN_SUPABASE_ANON_KEY
       autoSync.value = data.autoSync !== undefined ? !!data.autoSync : DEFAULT_AUTO_SYNC
       debugMode.value = !!data.debugMode
+      enableSelectionTranslation.value = data.enableSelectionTranslation !== undefined ? !!data.enableSelectionTranslation : DEFAULT_ENABLE_SELECTION_TRANSLATION
+      selectionMaxTokens.value = toPositiveNumber(data.selectionMaxTokens, DEFAULT_SELECTION_MAX_TOKENS)
+      selectionChatMaxTokens.value = toPositiveNumber(data.selectionChatMaxTokens, DEFAULT_SELECTION_CHAT_MAX_TOKENS)
     } catch (e) {
       console.error('加载设置失败:', e)
       if (!providers.value.length) {
@@ -307,7 +317,10 @@ export const useSettingsStore = defineStore('settings', () => {
         supabaseAnonKey: supabaseAnonKey.value,
         autoSync: autoSync.value,
         debugMode: debugMode.value,
-        fontSize: fontSize.value
+        fontSize: fontSize.value,
+        enableSelectionTranslation: enableSelectionTranslation.value,
+        selectionMaxTokens: selectionMaxTokens.value,
+        selectionChatMaxTokens: selectionChatMaxTokens.value
       }))
     } catch (e) {
       console.error('保存设置失败:', e)
@@ -334,7 +347,10 @@ export const useSettingsStore = defineStore('settings', () => {
       supabaseAnonKey: supabaseAnonKey.value,
       autoSync: autoSync.value,
       debugMode: debugMode.value,
-      fontSize: fontSize.value
+      fontSize: fontSize.value,
+      enableSelectionTranslation: enableSelectionTranslation.value,
+      selectionMaxTokens: selectionMaxTokens.value,
+      selectionChatMaxTokens: selectionChatMaxTokens.value
     }
   }
 
@@ -357,6 +373,9 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.autoSync !== undefined) autoSync.value = !!data.autoSync
     if (data.debugMode !== undefined) debugMode.value = !!data.debugMode
     if (data.fontSize !== undefined) fontSize.value = toPositiveNumber(data.fontSize, DEFAULT_FONT_SIZE)
+    if (data.enableSelectionTranslation !== undefined) enableSelectionTranslation.value = !!data.enableSelectionTranslation
+    if (data.selectionMaxTokens !== undefined) selectionMaxTokens.value = toPositiveNumber(data.selectionMaxTokens, DEFAULT_SELECTION_MAX_TOKENS)
+    if (data.selectionChatMaxTokens !== undefined) selectionChatMaxTokens.value = toPositiveNumber(data.selectionChatMaxTokens, DEFAULT_SELECTION_CHAT_MAX_TOKENS)
     applyTheme()
     applyFontSize()
     saveSettings()
@@ -445,7 +464,7 @@ export const useSettingsStore = defineStore('settings', () => {
   loadSettings()
   loadSyncTimes()
 
-  watch([providers, textModelConfig, visionModelConfig, theme, fontSize, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode], () => {
+  watch([providers, textModelConfig, visionModelConfig, theme, fontSize, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode, enableSelectionTranslation, selectionMaxTokens, selectionChatMaxTokens], () => {
     if (silentApply) return
     applyFontSize()
     saveSettings()
@@ -469,6 +488,9 @@ export const useSettingsStore = defineStore('settings', () => {
     autoSync,
     debugMode,
     fontSize,
+    enableSelectionTranslation,
+    selectionMaxTokens,
+    selectionChatMaxTokens,
     isDark,
     addCustomProvider,
     removeProvider,

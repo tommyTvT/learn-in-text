@@ -3,16 +3,20 @@ import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useArticleStore } from '../stores/article'
 import { useWordStore } from '../stores/word'
-import { parseArticle, getWordContext } from '../services/parser'
-import { wordMarkService, contextTranslationService } from '../services/db'
-import { generateWordBasicInfo, generateWordContextTranslation, batchGenerateWords } from '../services/ai'
+import { useSettingsStore } from '../stores/settings'
+import { parseArticle, getWordContext, getWordSentenceWithContext, getSelectionContext, normalizeSelectionText } from '../services/parser'
+import { wordMarkService, contextTranslationService, selectionTranslationService, selectionHash } from '../services/db'
+import { generateWordBasicInfo, generateWordContextTranslation, batchGenerateWords, generateSelectionTranslation } from '../services/ai'
 import WordPopup from '../components/Word/WordPopup.vue'
+import SelectionPopup from '../components/Word/SelectionPopup.vue'
+import SelectionChatModal from '../components/Word/SelectionChatModal.vue'
 import EditArticleModal from '../components/Article/EditArticleModal.vue'
 
 const route = useRoute()
 const router = useRouter()
 const articleStore = useArticleStore()
 const wordStore = useWordStore()
+const settingsStore = useSettingsStore()
 
 const article = ref(null)
 const parsedContent = ref(null)
@@ -33,6 +37,21 @@ const isViewMode = computed(() => route.query.mode === 'view')
 const stickyHighlights = ref(new Map())
 
 const showEditModal = ref(false)
+
+// ---- 划词翻译（选区翻译 + 追问解析） ----
+const articleContentRef = ref(null)
+const showSelectionBubble = ref(false)
+const selectionBubbleStyle = ref({ left: '-9999px', top: '-9999px' })
+const selectionText = ref('')
+const selectionRect = ref(null)
+const selectionContext = ref('')
+const showSelectionPopup = ref(false)
+const selectionTranslation = ref(null)
+const loadingSelection = ref(false)
+const selectionError = ref(false)
+let selectionRequestId = 0
+const showSelectionChat = ref(false)
+let selectionChangeTimer = null
 
 async function onArticleSaved() {
   article.value = await articleStore.fetchArticle(article.value.id)
@@ -57,12 +76,21 @@ onMounted(async () => {
   localMarks.value = new Set(marks.map(m => m.occKey))
   // 延迟批量生成词义，等首屏渲染完成后再发起 AI 请求，避免进入页面瞬间卡顿
   autoGenerateTimer = setTimeout(() => autoGenerateAllWords(), 600)
+  // 划词翻译：PC 拖选/双击（mouseup）与移动端长按选择（selectionchange 防抖）
+  document.addEventListener('mouseup', handleDocumentMouseup)
+  document.addEventListener('selectionchange', handleSelectionChange)
 })
 
 onUnmounted(() => {
   if (autoGenerateTimer) {
     clearTimeout(autoGenerateTimer)
     autoGenerateTimer = null
+  }
+  document.removeEventListener('mouseup', handleDocumentMouseup)
+  document.removeEventListener('selectionchange', handleSelectionChange)
+  if (selectionChangeTimer) {
+    clearTimeout(selectionChangeTimer)
+    selectionChangeTimer = null
   }
 })
 
@@ -99,6 +127,9 @@ function getMarkedWordIdsInArticle() {
 
 async function handleWordClick(event, part) {
   event.preventDefault()
+
+  // 拖选/双击产生的非空选区走划词翻译入口，不触发单词学习标记
+  if (window.getSelection()?.toString()?.trim()) return
 
   if (!isViewMode.value) {
     const sticky = stickyHighlights.value.get(part.occKey)
@@ -155,6 +186,10 @@ async function judgeWordColor(part) {
 }
 
 function openPopup(event, part) {
+  // 单词弹窗与划词翻译互斥
+  showSelectionBubble.value = false
+  if (showSelectionPopup.value) closeSelectionPopup()
+
   const rect = event.target.getBoundingClientRect()
   wordPosition.value = {
     wordRect: {
@@ -258,8 +293,9 @@ async function loadContextTranslation(word, occKey, requestId) {
   contextError.value = false
   loadingContext.value = true
   try {
-    const context = getWordContext(article.value.content, word, 0, getOccurrence(occKey))
-    const result = await generateWordContextTranslation(word, context)
+    // sentence：目标词所在单句（限定翻译输出范围）；context：前后各多带一句，供 AI 理解语境
+    const { sentence, context } = getWordSentenceWithContext(article.value.content, word, getOccurrence(occKey))
+    const result = await generateWordContextTranslation(word, sentence, context)
     if (requestId !== wordDetailRequestId) return
     if (!result.contextTranslation) {
       throw new Error('翻译结果为空')
@@ -290,6 +326,176 @@ function closePopup() {
   contextTranslation.value = null
   contextError.value = false
   activeOccKey.value = null
+}
+
+// ---- 划词翻译 ----
+
+function isInsideArticleContent(node) {
+  return !!(articleContentRef.value && node && articleContentRef.value.contains(node))
+}
+
+// 校验当前选区：仅文章内容区内、长度 2~1000 字符的选区才触发划词翻译
+function getValidSelection() {
+  const sel = window.getSelection?.()
+  if (!sel || sel.rangeCount === 0) return null
+  const text = String(sel.toString() || '').trim()
+  if (text.length < 2 || text.length > 1000) return null
+  if (!isInsideArticleContent(sel.anchorNode) || !isInsideArticleContent(sel.focusNode)) return null
+  return { sel, text }
+}
+
+// 气泡定位：选区下方优先（避开上方系统选择菜单），取不到选区矩形时贴屏幕底部
+function positionBubble(rect) {
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const pad = 8
+  const bubbleWidth = 44
+  let left = rect ? rect.left + rect.width / 2 - bubbleWidth / 2 : vw / 2 - bubbleWidth / 2
+  left = Math.max(pad, Math.min(left, vw - bubbleWidth - pad))
+  let top
+  if (rect && rect.bottom + 40 <= vh) {
+    top = rect.bottom + 8
+  } else if (rect && rect.top > 48) {
+    top = rect.top - 40
+  } else {
+    top = vh - 64
+  }
+  selectionBubbleStyle.value = { left: `${left}px`, top: `${top}px` }
+}
+
+function handleSelectionDetected() {
+  if (!settingsStore.enableSelectionTranslation) return
+  if (showSelectionPopup.value || showSelectionChat.value) return
+  const found = getValidSelection()
+  if (!found) {
+    showSelectionBubble.value = false
+    return
+  }
+  // 双击选词时单词弹窗可能已先弹出，检测到选区即切换为划词入口
+  if (selectedWord.value) closePopup()
+  let rect = null
+  try {
+    rect = found.sel.getRangeAt(0).getBoundingClientRect()
+  } catch { /* 部分移动端浏览器取不到矩形，气泡贴底部 */ }
+  positionBubble(rect)
+  showSelectionBubble.value = true
+}
+
+function handleDocumentMouseup(event) {
+  // 点击气泡自身不处理（气泡有自己的点击逻辑，避免误收起）
+  if (event?.target?.closest?.('.selection-bubble')) return
+  handleSelectionDetected()
+}
+
+// 移动端长按选择走 selectionchange，防抖 250ms
+function handleSelectionChange() {
+  if (selectionChangeTimer) clearTimeout(selectionChangeTimer)
+  selectionChangeTimer = setTimeout(() => {
+    selectionChangeTimer = null
+    handleSelectionDetected()
+  }, 250)
+}
+
+function handleBubbleClick() {
+  const found = getValidSelection()
+  if (!found) {
+    showSelectionBubble.value = false
+    return
+  }
+  let rect = null
+  try {
+    rect = found.sel.getRangeAt(0).getBoundingClientRect()
+  } catch { /* 取不到矩形时弹窗退化为视口中心定位 */ }
+  openSelectionPopup(found.text, rect)
+  window.getSelection().removeAllRanges()
+}
+
+function openSelectionPopup(text, rect) {
+  closePopup()
+  showSelectionBubble.value = false
+  selectionText.value = text
+  selectionRect.value = rect
+    ? {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height
+      }
+    : null
+  selectionContext.value = ''
+  selectionTranslation.value = null
+  selectionError.value = false
+  showSelectionPopup.value = true
+  loadSelectionTranslation(text)
+}
+
+async function loadSelectionTranslation(text) {
+  const requestId = ++selectionRequestId
+  const hash = selectionHash(text)
+  loadingSelection.value = true
+  selectionError.value = false
+  selectionTranslation.value = null
+  try {
+    const cached = await selectionTranslationService.get(articleId.value, hash).catch(() => null)
+    if (requestId !== selectionRequestId) return
+    // 命中缓存：规范化后文本一致才使用（防哈希碰撞）
+    if (cached?.translation && normalizeSelectionText(cached.text) === normalizeSelectionText(text)) {
+      selectionTranslation.value = cached.translation
+      if (!selectionContext.value) {
+        selectionContext.value = getSelectionContext(article.value.content, text)
+      }
+      return
+    }
+
+    const context = getSelectionContext(article.value.content, text)
+    if (requestId !== selectionRequestId) return
+    selectionContext.value = context
+
+    const result = await generateSelectionTranslation(text, context)
+    if (requestId !== selectionRequestId) return
+    if (!result.translation) {
+      throw new Error('翻译结果为空')
+    }
+    await selectionTranslationService.set(articleId.value, hash, text, result.translation)
+    selectionTranslation.value = result.translation
+  } catch (error) {
+    console.error('划词翻译生成失败:', error.message)
+    if (requestId === selectionRequestId) {
+      selectionError.value = true
+    }
+  } finally {
+    if (requestId === selectionRequestId) {
+      loadingSelection.value = false
+    }
+  }
+}
+
+function retrySelectionTranslation() {
+  if (!selectionText.value) return
+  loadSelectionTranslation(selectionText.value)
+}
+
+function closeSelectionPopup() {
+  showSelectionPopup.value = false
+  selectionTranslation.value = null
+  selectionError.value = false
+  loadingSelection.value = false
+}
+
+// 追问解析：关闭翻译弹窗，打开对话窗口（对话历史仅会话内存态，关闭即清）
+function openSelectionChat() {
+  if (!selectionContext.value && selectionText.value && article.value) {
+    selectionContext.value = getSelectionContext(article.value.content, selectionText.value)
+  }
+  showSelectionPopup.value = false
+  showSelectionBubble.value = false
+  showSelectionChat.value = true
+}
+
+function closeSelectionChat() {
+  showSelectionChat.value = false
 }
 
 async function autoGenerateAllWords() {
@@ -443,7 +649,7 @@ const renderedParagraphs = computed(() => {
 
       <p v-if="article.description" class="text-sm text-gray-500 dark:text-neutral-400 -mt-2 mb-5">{{ article.description }}</p>
 
-      <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-2 mb-5">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。</p>
+      <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-2 mb-5">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。拖选文字可翻译词句，译文下方可追问语法解析。</p>
 
       <div v-if="batchProgress.running" class="mb-4">
         <div class="flex justify-between text-sm text-gray-600 dark:text-neutral-400 mb-1">
@@ -459,7 +665,7 @@ const renderedParagraphs = computed(() => {
         <p v-if="batchProgress.error" class="text-xs text-red-500 dark:text-red-400 mt-1">{{ batchProgress.error }}</p>
       </div>
 
-      <div class="max-w-none leading-relaxed text-gray-800 dark:text-neutral-200">
+      <div ref="articleContentRef" class="max-w-none leading-relaxed text-gray-800 dark:text-neutral-200">
         <template v-for="(paragraphParts, paragraphIndex) in renderedParagraphs" :key="paragraphIndex">
           <p class="mb-4 last:mb-0">
             <template v-for="(part, index) in paragraphParts" :key="index">
@@ -501,6 +707,35 @@ const renderedParagraphs = computed(() => {
       @close="closePopup"
       @auto-generate="generateBasicInfo"
       @retry-context="retryContextTranslation"
+    />
+
+    <!-- 划词翻译气泡 -->
+    <button
+      v-if="showSelectionBubble"
+      class="selection-bubble fixed z-40 px-3 py-1 rounded-full bg-blue-600 text-white text-sm shadow-lg hover:bg-blue-700 select-none"
+      :style="selectionBubbleStyle"
+      @mousedown.prevent
+      @touchstart.prevent="handleBubbleClick"
+      @click="handleBubbleClick"
+    >译</button>
+
+    <SelectionPopup
+      v-if="showSelectionPopup"
+      :text="selectionText"
+      :translation="selectionTranslation"
+      :loading="loadingSelection"
+      :error="selectionError"
+      :position="selectionRect"
+      @close="closeSelectionPopup"
+      @retry="retrySelectionTranslation"
+      @ask="openSelectionChat"
+    />
+
+    <SelectionChatModal
+      v-if="showSelectionChat"
+      :text="selectionText"
+      :context="selectionContext"
+      @close="closeSelectionChat"
     />
   </div>
 
