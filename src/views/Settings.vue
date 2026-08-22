@@ -3,14 +3,17 @@ import { ref, computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useSettingsStore } from '../stores/settings'
 import { useAuthStore } from '../stores/auth'
+import { useWordStore } from '../stores/word'
 import { exportService } from '../services/db'
 import { testConnection as testCloudConnection, syncNow, clearCloud } from '../services/sync'
-import { lastSyncState, setLastSyncState } from '../services/autoSync'
+import { lastSyncState, setLastSyncState, resetLastSyncState } from '../services/autoSync'
+import { clearLocalData, downloadFullBackup } from '../services/localData'
 import AIConfigModal from '../components/AI/AIConfigModal.vue'
 import ModelConfigModal from '../components/AI/ModelConfigModal.vue'
 
 const settingsStore = useSettingsStore()
 const authStore = useAuthStore()
+const wordStore = useWordStore()
 
 const isLoggedIn = computed(() => authStore.isLoggedIn)
 
@@ -20,6 +23,7 @@ const exporting = ref(false)
 const importing = ref(false)
 const showDevOptions = ref(false)
 const dataStats = ref(null)
+const loggingOut = ref(false)
 
 // 云同步状态
 const cloudTesting = ref(false)
@@ -102,22 +106,41 @@ async function handleClearCloud() {
 }
 
 async function handleLogout() {
-  if (!confirm('确定要退出登录吗？本地数据不受影响。')) return
-  await authStore.logout()
+  if (!confirm('退出登录前会先把本地数据同步到云端，然后清除本设备上的本地数据（重新登录后可从云端恢复）。确定退出登录吗？')) return
+
+  loggingOut.value = true
+  try {
+    // 1. 先同步，确保云端保留最新数据（与自动同步共用并发锁，进行中会复用同一 Promise）
+    try {
+      const result = await syncNow()
+      setLastSyncState(true, result.message, result.detail, 'manual')
+    } catch (error) {
+      if (!confirm(`同步失败：${error.message}\n\n继续退出将清除本地数据，未同步的改动会丢失（可取消后先导出备份）。仍要继续吗？`)) return
+    }
+
+    // 2. 清除本地数据（含 tombstone 与归属标记），设置一并重置为默认
+    try {
+      await clearLocalData()
+      await settingsStore.resetSettings()
+    } catch (error) {
+      alert('清除本地数据失败：' + error.message + '，已取消退出登录')
+      return
+    }
+    resetLastSyncState()
+    wordStore.fetchMarkedWords(true)
+    loadStats()
+
+    // 3. 登出
+    await authStore.logout()
+  } finally {
+    loggingOut.value = false
+  }
 }
 
 async function exportAllData() {
   exporting.value = true
   try {
-    const data = await exportService.exportFull()
-    data.settings = settingsStore.exportSettings()
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `learn_in_text_backup_${new Date().toISOString().split('T')[0]}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    await downloadFullBackup(settingsStore.exportSettings())
     alert('导出成功')
   } catch (error) {
     alert('导出失败: ' + error.message)
@@ -194,9 +217,10 @@ onMounted(() => {
           </div>
           <button
             @click="handleLogout"
-            class="shrink-0 px-3 py-1.5 text-sm text-gray-600 dark:text-neutral-400 border border-gray-300 dark:border-neutral-700 rounded-md hover:text-red-600 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-800 cursor-pointer"
+            :disabled="loggingOut"
+            class="shrink-0 px-3 py-1.5 text-sm text-gray-600 dark:text-neutral-400 border border-gray-300 dark:border-neutral-700 rounded-md hover:text-red-600 dark:hover:text-red-400 hover:border-red-300 dark:hover:border-red-800 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
           >
-            退出登录
+            {{ loggingOut ? '退出中...' : '退出登录' }}
           </button>
         </div>
       </template>
@@ -356,7 +380,7 @@ onMounted(() => {
               <div>
                 <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">划词翻译</h3>
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                  开启后，阅读页拖选文字可翻译词句，译文下方可追问语法解析。关闭后不再显示选区翻译气泡。
+                  开启后，阅读页拖选文字可翻译词句并自动解析句子成分，可继续追问。关闭后不再显示选区翻译气泡。
                 </p>
               </div>
               <button

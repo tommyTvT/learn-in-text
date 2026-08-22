@@ -18,6 +18,9 @@ let running = false
 let lastAttemptAt = 0
 let bootDelayTimer = null
 let stopWatchers = []
+// 暂停标志：本地数据归属决策进行中时阻止一切后台自动同步，
+// 防止用户在弹窗上选择前，残留数据被 boot/切前台/网络恢复等触发源推给新账号
+let paused = false
 
 function readStoredState() {
   try {
@@ -48,7 +51,8 @@ const SOURCE_LABELS = {
   visibility: '切回前台',
   online: '网络恢复',
   settings: '设置开启',
-  route: '页面切换'
+  route: '页面切换',
+  login: '登录后同步'
 }
 
 /**
@@ -87,6 +91,42 @@ export function setLastSyncState(success, message, detail = null, source = 'manu
   debugLogSync(source, success, message, detail)
 }
 
+/**
+ * 登录成功后立即全量同步一次：登录是明确的同步意图，
+ * 与手动同步同级，不受自动同步开关 / 失败退避 / paused 限制
+ * （syncNow 自带并发合并锁，与进行中的同步安全复用）。
+ * 结果写入「上次同步」状态；失败不抛出，不阻塞进入应用，
+ * 后续可由自动同步或手动同步重试。
+ */
+export async function syncAfterLogin() {
+  try {
+    const result = await syncNow()
+    setLastSyncState(true, result.message, result.detail, 'login')
+  } catch (error) {
+    setLastSyncState(false, error.message || '同步失败', null, 'login')
+  }
+}
+
+/** 清空本地数据后重置同步状态（登出清除 / 换号清除场景） */
+export function resetLastSyncState() {
+  try {
+    localStorage.removeItem(LAST_SYNC_KEY)
+  } catch {
+    // 忽略存储异常
+  }
+  lastSyncState.value = null
+}
+
+/** 暂停后台自动同步（本地数据归属决策进行中） */
+export function pauseAutoSync() {
+  paused = true
+}
+
+/** 恢复后台自动同步（归属决策完成） */
+export function resumeAutoSync() {
+  paused = false
+}
+
 // 翻页触发的同步延迟防抖：切换页面后等待一段时间再执行，
 // 避免与页面切换动画、首屏渲染抢占资源导致卡顿；多次快速翻页只同步一次。
 const ROUTE_SYNC_DELAY_MS = 1500
@@ -108,7 +148,17 @@ export function requestSync() {
 function isConfigured() {
   const s = useSettingsStore()
   const auth = useAuthStore()
-  return !!(auth.isLoggedIn && s.supabaseUrl?.trim() && s.supabaseAnonKey?.trim())
+  // auth.ready：会话恢复完成（含用户名拉取）后才允许同步。
+  // 否则重新打开页面时 session 已恢复但 username 还在请求中，
+  // 同步会误报「请先登录后再同步」并写入上次同步状态。
+  // username 为空时同样跳过：syncNow 需要用户名，缺失时静默跳过优于记录失败。
+  return !!(
+    auth.ready &&
+    auth.isLoggedIn &&
+    auth.username?.trim() &&
+    s.supabaseUrl?.trim() &&
+    s.supabaseAnonKey?.trim()
+  )
 }
 
 /**
@@ -150,6 +200,7 @@ function releaseLock() {
  * source 用于调试输出，标明本次同步的触发来源。
  */
 async function runSync(source = 'auto') {
+  if (paused) return
   if (!autoSyncEnabled()) return
   if (running || !isConfigured()) return
   if (Date.now() - lastAttemptAt < RETRY_BACKOFF_MS) return

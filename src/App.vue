@@ -1,4 +1,5 @@
-﻿<script setup>
+
+<script setup>
 import { RouterView, useRouter, useRoute } from 'vue-router'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useWordStore } from './stores/word'
@@ -67,8 +68,9 @@ function preloadRouteComponents(to) {
 onMounted(() => {
   preloadCommonPages()
   wordStore.fetchMarkedWords()
-  // 恢复登录会话
-  auth.restoreSession()
+  // 恢复登录会话；恢复完成后（session + username 就绪）补一次同步，
+  // 避免慢网络下 boot 同步（3s 延迟）因会话未恢复完被跳过后，首次同步要等 5 分钟定时器
+  auth.restoreSession().then(() => requestSync())
   // 打开网站时启动后台自动云同步（首次同步会在渲染完成后延迟执行）
   startAutoSync()
   // 切换页面（路由）时触发一次后台同步，保证数据及时上传/拉取

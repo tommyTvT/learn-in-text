@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { useAuthStore } from './auth'
 import { fetchCloudSettings, pushCloudSettings } from '../services/settingsSync'
 
@@ -461,6 +461,48 @@ export const useSettingsStore = defineStore('settings', () => {
     }, 800)
   }
 
+  /**
+   * 重置为出厂默认设置并清除本地存储（登出 / 换号清除场景）。
+   * silentApply 需维持到 watcher 回调执行完（watch 默认异步 flush），
+   * 否则重置会被当作本地修改触发 saveSettings + 云端回传。
+   */
+  async function resetSettings() {
+    silentApply = true
+    try {
+      providers.value = [createPresetProvider('deepseek')]
+      textModelConfig.value = { providerId: providers.value[0].id, model: PRESET_PROVIDERS.deepseek.model }
+      visionModelConfig.value = { providerId: providers.value[0].id, model: '' }
+      theme.value = 'system'
+      fontSize.value = DEFAULT_FONT_SIZE
+      maxConcurrency.value = DEFAULT_MAX_CONCURRENCY
+      basicInfoMaxTokens.value = DEFAULT_BASIC_INFO_MAX_TOKENS
+      contextMaxTokens.value = DEFAULT_CONTEXT_MAX_TOKENS
+      articleMaxTokens.value = DEFAULT_ARTICLE_MAX_TOKENS
+      requestTimeout.value = DEFAULT_REQUEST_TIMEOUT
+      supabaseUrl.value = BUILTIN_SUPABASE_URL
+      supabaseAnonKey.value = BUILTIN_SUPABASE_ANON_KEY
+      autoSync.value = DEFAULT_AUTO_SYNC
+      debugMode.value = false
+      enableSelectionTranslation.value = DEFAULT_ENABLE_SELECTION_TRANSLATION
+      selectionMaxTokens.value = DEFAULT_SELECTION_MAX_TOKENS
+      selectionChatMaxTokens.value = DEFAULT_SELECTION_CHAT_MAX_TOKENS
+      // 同步时间一并清零：重置后的本地设置不再参与 LWW 比较，
+      // 下次登录时以云端（或默认值首推）为准
+      syncedAt.value = 0
+      try {
+        localStorage.removeItem(STORAGE_KEY)
+        localStorage.removeItem(SETTINGS_TIME_KEY)
+      } catch {
+        // 忽略存储异常
+      }
+      applyTheme()
+      applyFontSize()
+      await nextTick()
+    } finally {
+      silentApply = false
+    }
+  }
+
   loadSettings()
   loadSyncTimes()
 
@@ -504,6 +546,7 @@ export const useSettingsStore = defineStore('settings', () => {
     applyFontSize,
     exportSettings,
     importSettings,
+    resetSettings,
     syncFromCloud,
     pushToCloud,
     cloudSyncing

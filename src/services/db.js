@@ -694,13 +694,16 @@ export const exportService = {
     return stats
   },
 
+  // 清空本地数据必须连同 tombstone 一起清：残留其他账号的删除标记，
+  // 会在换账号同步时按稳定键误软删当前账号的云端记录
   async clearAllData() {
-    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.selectionTranslations, async () => {
+    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.selectionTranslations, db.tombstones, async () => {
       await db.articles.clear()
       await db.words.clear()
       await db.wordMarks.clear()
       await db.contextTranslations.clear()
       await db.selectionTranslations.clear()
+      await db.tombstones.clear()
     })
   },
 

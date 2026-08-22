@@ -99,9 +99,9 @@ async function request(path, { baseURL, apiKey, body, timeoutMs, signal }) {
   }
 }
 
-async function createChatCompletion(params, type = 'text') {
+async function createChatCompletion(params, type = 'text', signal) {
   const { baseURL, apiKey, timeoutMs } = getModelConfig(type)
-  return request('/chat/completions', { baseURL, apiKey, body: params, timeoutMs })
+  return request('/chat/completions', { baseURL, apiKey, body: params, timeoutMs, signal })
 }
 
 /** 估算文本 token 数（粗略近似，仅用于进度条）：英文约 4 字符/token，中文约 1 字符/token */
@@ -305,9 +305,238 @@ export async function generateSelectionTranslation(selection, context = '') {
   return { translation: String(parsed.translation || '').trim() }
 }
 
+/** 句子成分角色合法枚举（与前端 grammarConstants 的 ROLE_LABELS 对应） */
+const COMPONENT_ROLES = ['subject', 'predicate', 'object', 'attributive', 'adverbial', 'complement', 'predicative']
+
+/** 从句大类 → 合法子类枚举（与前端 grammarConstants 的 CLAUSE_SUBTYPE_LABELS 对应） */
+const CLAUSE_SUBTYPES = {
+  noun: ['subject_clause', 'object_clause', 'predicative_clause', 'appositive_clause'],
+  relative: ['restrictive', 'non_restrictive'],
+  adverbial: ['time', 'place', 'reason', 'condition', 'concession', 'purpose', 'result', 'manner', 'comparison']
+}
+
+/** 名词性从句子类 → 在主句中充当的成分（用于校正 AI 标注） */
+const NOUN_CLAUSE_ROLES = {
+  subject_clause: 'subject',
+  object_clause: 'object',
+  predicative_clause: 'predicative',
+  appositive_clause: 'attributive'
+}
+
+/** 从句最大嵌套深度（超过按普通片段渲染，防止结构过深难以阅读） */
+const MAX_CLAUSE_DEPTH = 3
+
+/**
+ * 校验用文本归一化：去除全部空白（AI 可能把空格归入不同片段），
+ * 并统一常见排版引号/撇号，避免 AI 转换引号样式导致还原校验误判
+ */
+function normalizeForCompare(text) {
+  return String(text || '')
+    .replace(/\s+/g, '')
+    .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u2033]/g, '"')
+}
+
+/**
+ * 递归归一化 AI 返回的成分片段：
+ * - 校验 role / clause.type / clause.subtype 合法性
+ * - 从句内部片段拼接须还原从句原文，否则该从句降级为普通片段（保留 role，丢弃内部结构）
+ * - 限制嵌套深度
+ * @param {object} raw AI 返回的单个片段
+ * @param {number} depth 当前嵌套深度（顶层为 0）
+ * @returns {{text: string, role: string, clause?: {type: string, subtype: string, segments: Array}}|null}
+ */
+function normalizeSegment(raw, depth = 0) {
+  if (!raw || typeof raw !== 'object') return null
+  const text = String(raw.text ?? '')
+  if (!text) return null
+  const role = COMPONENT_ROLES.includes(raw.role) ? raw.role : 'none'
+  const node = { text, role }
+
+  const clause = raw.clause
+  if (clause && typeof clause === 'object' && depth < MAX_CLAUSE_DEPTH) {
+    const type = Object.prototype.hasOwnProperty.call(CLAUSE_SUBTYPES, clause.type)
+      ? clause.type
+      : null
+    if (type) {
+      const subtype = CLAUSE_SUBTYPES[type].includes(clause.subtype) ? clause.subtype : ''
+      const children = (Array.isArray(clause.segments) ? clause.segments : [])
+        .map(s => normalizeSegment(s, depth + 1))
+        .filter(Boolean)
+      // 从句内部拼接须还原从句原文，否则视为不可靠结构，降级为普通片段
+      const joined = normalizeForCompare(children.map(c => c.text).join(''))
+      if (children.length && joined && joined === normalizeForCompare(text)) {
+        node.clause = { type, subtype, segments: children }
+        // 校正从句在主句中的角色：定语/状语从句固定，名词性从句按子类推导
+        if (type === 'noun' && subtype && NOUN_CLAUSE_ROLES[subtype]) {
+          node.role = NOUN_CLAUSE_ROLES[subtype]
+        } else if (type === 'relative') {
+          node.role = 'attributive'
+        } else if (type === 'adverbial') {
+          node.role = 'adverbial'
+        }
+      }
+    }
+  }
+  return node
+}
+
+/**
+ * 句子成分解析的会话级内存缓存（简易 LRU）：
+ * 阅读时反复选中同一段文本（含相同语境）直接复用历史解析结果，避免重复 AI 请求。
+ */
+const componentParseCache = new Map()
+const COMPONENT_CACHE_MAX = 50
+
+function componentCacheKey(text, context) {
+  return text + '|||' + (context || '')
+}
+
+/** LRU 读：命中后移到 Map 尾部（最近使用）；深拷贝返回，避免调用方改动影响缓存 */
+function componentCacheGet(key) {
+  if (!componentParseCache.has(key)) return undefined
+  const value = componentParseCache.get(key)
+  componentParseCache.delete(key)
+  componentParseCache.set(key, value)
+  return structuredClone(value)
+}
+
+/** LRU 写：达到上限时淘汰 Map 首个条目（最久未使用）；存入深拷贝，保持缓存数据不被外部改动污染 */
+function componentCacheSet(key, value) {
+  if (componentParseCache.size >= COMPONENT_CACHE_MAX) {
+    componentParseCache.delete(componentParseCache.keys().next().value)
+  }
+  componentParseCache.set(key, structuredClone(value))
+}
+
+/**
+ * 句子成分拆分：把选中的英文文本按语法成分（主谓宾定状补表）切分并标注角色，
+ * 同时识别从句（名词性/定语/状语从句）并递归标注从句内部成分，用于前端多层次彩色渲染。
+ * @param {string} text 选中的待解析文本
+ * @param {string} context 选中文本所在语境（仅供 AI 理解背景，可为空）
+ * @param {AbortSignal} signal 外部中止信号（关闭窗口时 abort）
+ * @returns {Promise<{segments: Array<{text: string, role: string, clause?: object}>}>} 按原文顺序的成分片段（可嵌套从句）
+ */
+export async function parseSelectionComponents(text, context = '', signal) {
+  // 命中缓存：同文本+语境直接复用历史解析结果
+  const cacheKey = componentCacheKey(text, context)
+  const cached = componentCacheGet(cacheKey)
+  if (cached) return cached
+
+  const model = getModel()
+
+  const systemMessage = `你是英语语法解析助手。请把用户提供的英文文本按句子成分切分并标注角色，同时识别其中所有从句；从句整体标注后在内部继续切分其句子成分（可多层嵌套）。
+
+【最高优先级规则——原文还原】
+每个片段的 text 都必须逐字复制待解析文本，禁止改写、增删、翻译任何单词或标点：
+- 保持原文的大小写、连字符、撇号、引号样式（如 ' " “ ” ’）完全一致，不得做任何转换
+- 所有顶层片段的 text 按顺序拼接（忽略空格差异）必须恰好还原待解析文本，这是硬性校验条件
+- 每个从句片段的 clause.segments 按顺序拼接必须恰好还原该从句自身的 text
+- 返回前必须逐字自检以上两条拼接，不一致时先修正再输出
+
+一、成分角色（role 字段取值，仅限以下枚举）：
+- subject：主语
+- predicate：谓语（含助动词、情态动词构成的动词短语）
+- object：宾语（直接宾语与间接宾语均标 object）
+- attributive：定语（修饰名词的词、短语或从句）
+- adverbial：状语（修饰动词、形容词或整句的词、短语或从句）
+- complement：补语
+- predicative：表语
+- none：标点、连词、从句引导词等不单独归入上述成分的部分
+
+二、从句标注：
+从句片段需额外携带 clause 对象，type/subtype 标明从句类型，segments 为从句内部成分（同样规则切分，可再嵌套从句）：
+- noun（名词性从句）：subtype ∈ subject_clause 主语从句 / object_clause 宾语从句 / predicative_clause 表语从句 / appositive_clause 同位语从句
+- relative（定语从句）：subtype ∈ restrictive 限制性 / non_restrictive 非限制性
+- adverbial（状语从句）：subtype ∈ time 时间 / place 地点 / reason 原因 / condition 条件 / concession 让步 / purpose 目的 / result 结果 / manner 方式 / comparison 比较
+
+role 与从句类型的对应（必须遵守）：主语从句→subject，宾语从句→object，表语从句→predicative，同位语从句→attributive，定语从句→attributive，状语从句→adverbial
+
+三、切分要求：
+1. 空格并入相邻片段内部，相邻英文单词片段之间必须保留空格；句末标点（. ? ! 等）不得遗漏，作为最后一个片段（role 为 none）
+2. 同一成分被标点或连词隔开时拆成多个片段，role 相同
+3. 冠词、介词、助动词等随所属成分整体标注（如 "the little girl" 整体为 subject）
+4. 从句引导词（that/which/who/because/although/if/when 等）作为从句内部第一个片段，role 为 none
+5. 非限制性定语从句前的逗号是独立片段（role 为 none），不并入从句
+6. 从句片段的 text 是从句完整原文（含引导词）
+7. 若文本不是完整句子（单词、词组等），也按其内部结构尽力标注；无从句时片段不带 clause 字段
+8. 只返回 JSON，不要任何解释；text 值不加引号或其它包裹符号
+
+返回JSON格式示例一（The book that I bought yesterday is interesting.）：
+{ "segments": [
+  { "text": "The book ", "role": "subject" },
+  { "text": "that I bought yesterday", "role": "attributive", "clause": { "type": "relative", "subtype": "restrictive", "segments": [
+    { "text": "that", "role": "none" },
+    { "text": "I ", "role": "subject" },
+    { "text": "bought ", "role": "predicate" },
+    { "text": "yesterday", "role": "adverbial" } ] } },
+  { "text": " is ", "role": "predicate" },
+  { "text": "interesting", "role": "predicative" },
+  { "text": ".", "role": "none" } ] }
+
+示例二（I will tell him that you called when he comes back.）：
+{ "segments": [
+  { "text": "I ", "role": "subject" },
+  { "text": "will tell ", "role": "predicate" },
+  { "text": "him", "role": "object" },
+  { "text": " ", "role": "none" },
+  { "text": "that you called", "role": "object", "clause": { "type": "noun", "subtype": "object_clause", "segments": [
+    { "text": "that", "role": "none" },
+    { "text": "you ", "role": "subject" },
+    { "text": "called", "role": "predicate" } ] } },
+  { "text": " ", "role": "none" },
+  { "text": "when he comes back", "role": "adverbial", "clause": { "type": "adverbial", "subtype": "time", "segments": [
+    { "text": "when", "role": "none" },
+    { "text": "he ", "role": "subject" },
+    { "text": "comes back", "role": "predicate" } ] } },
+  { "text": ".", "role": "none" } ] }`
+
+  const contextLine = context
+    ? `\n完整语境（仅供理解背景）："${context}"`
+    : ''
+  const userMessage = `待解析文本（切分结果必须逐字还原此文本）：\n"${text}"${contextLine}`
+
+  const params = chatOptions({
+    model,
+    messages: [
+      { role: 'system', content: systemMessage },
+      { role: 'user', content: userMessage }
+    ],
+    response_format: { type: 'json_object' },
+    // JSON 结构开销远大于纯文本，按字符数放大上限，避免长句输出被截断导致解析失败
+    max_tokens: Math.min(6000, Math.max(1000, Math.round(text.length * 4)))
+  })
+
+  // AI 输出具有随机性，校验失败时自动补一次请求，尽量避免让用户手动重试
+  let lastError
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await createChatCompletion(params, 'text', signal)
+    try {
+      const parsed = parseJsonSafely(response.choices[0].message.content)
+      const segments = (Array.isArray(parsed.segments) ? parsed.segments : [])
+        .map(s => normalizeSegment(s, 0))
+        .filter(Boolean)
+      if (!segments.length) {
+        throw new Error('解析结果为空')
+      }
+      // 顶层拼接须还原原文（忽略空白与引号样式差异），否则视为本次解析失败
+      if (normalizeForCompare(segments.map(s => s.text).join('')) !== normalizeForCompare(text)) {
+        throw new Error('解析结果与原文不一致')
+      }
+      // 解析成功（含拼接校验）后写入缓存；失败不缓存，便于重试拿到新结果
+      const result = { segments }
+      componentCacheSet(cacheKey, result)
+      return result
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError
+}
+
 /**
  * 划词追问：针对选中文本的多轮对话式解析（语法结构、句子成分、时态语态等），流式输出。
- * @param {Array<{role: 'user'|'assistant', content: string}>} history 对话历史（不含本轮问题）
+ * @param {Array<{role: 'user'|'assistant', content: string}>} history 对话历史（含本轮用户提问，末尾为 user）
  * @param {string} text 选中的待解析文本
  * @param {string} context 选中文本所在语境（仅供 AI 理解背景，可为空）
  * @param {(delta: string, full: string) => void} onDelta 流式增量回调（增量, 累计全文）
@@ -320,22 +549,30 @@ export async function chatAboutSelection(history, text, context = '', onDelta, s
   const contextLine = context
     ? `\n完整语境（仅供理解背景）："${context}"`
     : ''
+  // system 保持纯固定指令（不含待解析文本）：不同选区的追问共享同一 system 前缀，
+  // 利于服务端前缀缓存命中；待解析文本改由首条 user 消息固定携带
   const systemMessage = `你是英语学习助教。用户正在精读一篇英语文章，会针对一段选中的文本提问（语法解析、句子结构、时态语态、词汇用法、翻译等）。
-待解析文本："${text}"${contextLine}
 回答要求：
 1. 使用中文回答，条理清晰，面向中国英语学习者
-2. 直接输出内容，不要使用 Markdown 表格、代码块；可用换行和“1. 2. 3.”编号分点，重点词句用 **加粗** 标记
-3. 解析语法时给出简明结构（主语/谓语/宾语对应关系）；讲解词组时给出含义和例句`
+2. 直接输出内容，不要使用 Markdown 表格、代码块`
 
-  // 历史最多带最近 10 条，防止 token 膨胀（system 已含待解析文本）
+  // 历史最多带最近 10 条，防止 token 膨胀；裁剪后若以 assistant 开头，
+  // 会与固定确认消息连成两条 assistant，丢弃开头连续的 assistant 直到首个 user
   const trimmedHistory = (history || [])
     .filter(m => m && (m.role === 'user' || m.role === 'assistant') && m.content)
     .slice(-10)
+  while (trimmedHistory.length && trimmedHistory[0].role === 'assistant') {
+    trimmedHistory.shift()
+  }
 
   return await streamChatCompletion(chatOptions({
     model,
     messages: [
       { role: 'system', content: systemMessage },
+      // 待解析文本与语境作为首条 user 消息固定传入，同一会话多轮追问时内容不变
+      { role: 'user', content: `待解析文本：\n"${text}"${contextLine}` },
+      // 固定 assistant 确认，保证 user/assistant 严格交替，兼容严格校验角色交替的供应商
+      { role: 'assistant', content: '收到，我已了解这段文本。请针对它提问。' },
       ...trimmedHistory
     ],
     max_tokens: useSettingsStore().selectionChatMaxTokens || 1000
@@ -622,19 +859,20 @@ export const IMAGE_MAX_TOKENS = 4000
 export async function extractArticleFromImage(imageDataUrl, onProgress) {
   const model = getModel('vision')
 
-  const systemMessage = `你是英语文章识别助手。请识别图片中的英文文章，准确提取其中的文字内容。
+  const systemMessage = `你是英语文章识别助手。图片通常来自试卷、习题册等，可能是某道阅读理解的原文。请识别并提取其中的英文文章正文。
 
 返回JSON格式：
 {
-  "title": "文章标题（若图片中无标题则留空字符串）",
+  "title": "文章标题（若为试卷中的阅读题，可依据试卷信息判断题目类型，如\"阅读理解\"；有明确文章标题则用标题，无标题可留空字符串）",
   "description": "用中文一句话概括文章大致内容（30-60字，若无法判断可留空字符串）",
-  "content": "完整文章正文，保持原段落换行结构，不要遗漏、不要改写"
+  "content": "仅提取文章正文原文，保持原段落换行结构，不要遗漏、不要改写"
 }
 
 要求：
-1. content 必须完整、逐字准确识别图片中的英文原文，保持原有段落和换行
-2. 忽略图片中的水印、页码、广告、装饰等与文章无关的内容
-3. 如果图片模糊导致个别单词无法辨认，用 [illegible] 占位`
+1. content 只提取文章正文（如阅读理解的原文，可包含选项内容），不得包含题目要求、题干、页码、水印、广告、装饰等非正文内容
+2. 如果图片是试卷中的阅读题，可将题型信息（如"阅读理解"）体现在 title 中，题目要求等信息在 description 中概括说明，不进入 content
+3. content 必须完整、逐字准确识别图片中的英文原文，保持原有段落和换行，不要遗漏、不要改写
+4. 如果图片模糊导致个别单词无法辨认，用 [illegible] 占位`
 
   const content = await streamChatCompletion(chatOptions({
     model,

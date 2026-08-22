@@ -27,7 +27,9 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 登录/恢复会话后，若已登录则拉取并合并云端设置 */
+  /** 登录/恢复会话后，若已登录则拉取并合并云端设置。
+   *  注意：login/register 不再自动调用（需先完成本地数据归属决策，
+   *  否则会把上一账号的本地设置直接推给新账号云端），由视图在决策后调用。 */
   async function syncSettingsAfterLogin() {
     if (!session.value) return
     try {
@@ -54,19 +56,17 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 注册（注册成功即视为已登录） */
+  /** 注册（注册成功即视为已登录）；云端设置同步由视图在归属决策后调用 syncSettingsAfterLogin */
   async function register(payload) {
     const { session: newSession, user: newUser } = await authService.register(payload)
     await syncFromSession(newSession)
-    await syncSettingsAfterLogin()
     return { session: newSession, user: newUser }
   }
 
-  /** 登录 */
+  /** 登录；云端设置同步由视图在归属决策后调用 syncSettingsAfterLogin */
   async function login(payload) {
     const { session: newSession, user: newUser } = await authService.login(payload)
     await syncFromSession(newSession)
-    await syncSettingsAfterLogin()
     return { session: newSession, user: newUser }
   }
 
@@ -85,6 +85,7 @@ export const useAuthStore = defineStore('auth', () => {
     ready,
     isLoggedIn,
     syncFromSession,
+    syncSettingsAfterLogin,
     restoreSession,
     register,
     login,

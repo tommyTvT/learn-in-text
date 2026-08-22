@@ -2,14 +2,21 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { useSettingsStore } from '../stores/settings'
 import { handleEmailConfirmation, readableError } from '../services/auth'
+import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner } from '../services/localData'
+import { pauseAutoSync, resumeAutoSync } from '../services/autoSync'
+import LocalDataModal from '../components/Common/LocalDataModal.vue'
 import { LoaderCircle, CheckCircle2, XCircle } from 'lucide-vue-next'
 
 const auth = useAuthStore()
+const settingsStore = useSettingsStore()
 const router = useRouter()
 
 const status = ref('loading') // loading | success | error
 const message = ref('')
+const showLocalDataModal = ref(false)
+const localDataStats = ref(null)
 
 // 兜底跳转定时器句柄，卸载时需清理
 let redirectTimer = null
@@ -19,29 +26,72 @@ onUnmounted(() => {
     clearTimeout(redirectTimer)
     redirectTimer = null
   }
+  // 兜底：页面卸载时确保自动同步已恢复（弹窗未决策就离开的场景）
+  resumeAutoSync()
 })
 
+function finishAndRedirect() {
+  status.value = 'success'
+  message.value = '邮箱验证成功，正在进入...'
+  redirectTimer = setTimeout(() => router.replace('/'), 1200)
+}
+
+/** 本地数据归属决策：与登录页一致，残留其他账号/离线数据时先弹窗再进入 */
+async function decideLocalDataOwnership() {
+  const stats = await getLocalDataStats()
+  const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
+  if (hasData && getLocalDataOwner() !== auth.username) {
+    localDataStats.value = stats
+    showLocalDataModal.value = true
+    status.value = 'success'
+    message.value = '邮箱验证成功'
+    return // 暂不跳转，等用户在弹窗中决定如何处理本地数据
+  }
+  // 无学习数据冲突，但设置可能仍是其他账号的残留 → 先重置为默认，再拉云端设置
+  if (getLocalDataOwner() !== auth.username) {
+    await settingsStore.resetSettings()
+  }
+  setLocalDataOwner(auth.username)
+  await auth.syncSettingsAfterLogin()
+  resumeAutoSync()
+  finishAndRedirect()
+}
+
 onMounted(async () => {
+  // 验证即登录：在归属决策前暂停后台自动同步，防止启动/切前台触发的同步抢先推送残留数据
+  pauseAutoSync()
   // 等待 Supabase 客户端从 URL 中捕获并完成会话处理
   await new Promise((r) => setTimeout(r, 300))
   try {
     const session = await handleEmailConfirmation()
     if (session) {
-      // 已登录：恢复完整会话（用户信息 + 用户名 + 云端设置）并跳转首页
-      await auth.restoreSession()
-      status.value = 'success'
-      message.value = '邮箱验证成功，正在进入...'
-      redirectTimer = setTimeout(() => router.replace('/'), 1200)
+      // 只恢复会话（用户名），云端设置同步延后到归属决策之后
+      await auth.syncFromSession(session)
+      await decideLocalDataOwnership()
     } else {
       // 未捕获到 session：可能是验证链接已过期/重复点击，或令牌异常
+      resumeAutoSync()
       status.value = 'error'
       message.value = '未能检测到验证结果，请确认链接是否有效，或重新尝试登录。'
     }
   } catch (e) {
+    resumeAutoSync()
     status.value = 'error'
     message.value = readableError(e) || '验证失败，请重试。'
   }
 })
+
+function onLocalDataDone() {
+  showLocalDataModal.value = false
+  resumeAutoSync()
+  finishAndRedirect()
+}
+
+function onLocalDataCancel() {
+  showLocalDataModal.value = false
+  resumeAutoSync()
+  // 已取消登录（登出），停在验证结果页
+}
 </script>
 
 <template>
@@ -75,5 +125,13 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <LocalDataModal
+      v-if="showLocalDataModal && localDataStats"
+      :open="true"
+      :stats="localDataStats"
+      @done="onLocalDataDone"
+      @cancel="onLocalDataCancel"
+    />
   </div>
 </template>

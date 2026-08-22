@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useArticleStore } from '../stores/article'
@@ -43,7 +43,6 @@ const articleContentRef = ref(null)
 const showSelectionBubble = ref(false)
 const selectionBubbleStyle = ref({ left: '-9999px', top: '-9999px' })
 const selectionText = ref('')
-const selectionRect = ref(null)
 const selectionContext = ref('')
 const showSelectionPopup = ref(false)
 const selectionTranslation = ref(null)
@@ -74,6 +73,7 @@ onMounted(async () => {
   await loadArticleWords()
   const marks = await wordMarkService.getByArticle(articleId.value)
   localMarks.value = new Set(marks.map(m => m.occKey))
+  // 学习模式不默认显示历史标记的红色高亮：点击单词时才标红，再点击取消（仅隐藏视觉，不删数据）
   // 延迟批量生成词义，等首屏渲染完成后再发起 AI 请求，避免进入页面瞬间卡顿
   autoGenerateTimer = setTimeout(() => autoGenerateAllWords(), 600)
   // 划词翻译：PC 拖选/双击（mouseup）与移动端长按选择（selectionchange 防抖）
@@ -133,11 +133,14 @@ async function handleWordClick(event, part) {
 
   if (!isViewMode.value) {
     const sticky = stickyHighlights.value.get(part.occKey)
+    // 红色 = 之前就存在的历史标记：点击仅隐藏本次会话的视觉高亮，不删除数据库记录；
+    // 如需真正删除标记，请切换到管理模式点击单词取消
     if (sticky === 'red') {
       stickyHighlights.value.delete(part.occKey)
       closePopup()
       return
     }
+    // 黄色 = 本次学习中新增的标记：点击取消并删除数据库记录
     if (sticky === 'yellow') {
       await wordMarkService.remove(articleId.value, part.occKey)
       const newLocalMarks = new Set(localMarks.value)
@@ -402,29 +405,16 @@ function handleBubbleClick() {
     showSelectionBubble.value = false
     return
   }
-  let rect = null
-  try {
-    rect = found.sel.getRangeAt(0).getBoundingClientRect()
-  } catch { /* 取不到矩形时弹窗退化为视口中心定位 */ }
-  openSelectionPopup(found.text, rect)
+  openSelectionPopup(found.text)
   window.getSelection().removeAllRanges()
 }
 
-function openSelectionPopup(text, rect) {
+function openSelectionPopup(text) {
   closePopup()
   showSelectionBubble.value = false
   selectionText.value = text
-  selectionRect.value = rect
-    ? {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-        width: rect.width,
-        height: rect.height
-      }
-    : null
-  selectionContext.value = ''
+  // 同步备好上下文：弹窗挂载即触发句子成分解析，解析需要用它消歧
+  selectionContext.value = article.value ? getSelectionContext(article.value.content, text) : ''
   selectionTranslation.value = null
   selectionError.value = false
   showSelectionPopup.value = true
@@ -649,7 +639,7 @@ const renderedParagraphs = computed(() => {
 
       <p v-if="article.description" class="text-sm text-gray-500 dark:text-neutral-400 -mt-2 mb-5">{{ article.description }}</p>
 
-      <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-2 mb-5">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。拖选文字可翻译词句，译文下方可追问语法解析。</p>
+      <p v-if="!isViewMode" class="text-xs text-gray-400 dark:text-neutral-500 -mt-2 mb-5">点击单词学习:之前标记过的会标红并记入当前文章,陌生的会加入词库并标黄。拖选文字可翻译词句并自动解析句子成分，可继续追问。</p>
 
       <div v-if="batchProgress.running" class="mb-4">
         <div class="flex justify-between text-sm text-gray-600 dark:text-neutral-400 mb-1">
@@ -725,7 +715,7 @@ const renderedParagraphs = computed(() => {
       :translation="selectionTranslation"
       :loading="loadingSelection"
       :error="selectionError"
-      :position="selectionRect"
+      :context="selectionContext"
       @close="closeSelectionPopup"
       @retry="retrySelectionTranslation"
       @ask="openSelectionChat"

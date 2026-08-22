@@ -2,10 +2,15 @@
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { useSettingsStore } from '../stores/settings'
 import { validateLoginIdentifier, validatePassword, readableError } from '../services/auth'
+import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner } from '../services/localData'
+import { pauseAutoSync, resumeAutoSync, syncAfterLogin } from '../services/autoSync'
+import LocalDataModal from '../components/Common/LocalDataModal.vue'
 import { User, Lock, LoaderCircle } from 'lucide-vue-next'
 
 const auth = useAuthStore()
+const settingsStore = useSettingsStore()
 const router = useRouter()
 const route = useRoute()
 
@@ -13,6 +18,8 @@ const username = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
+const showLocalDataModal = ref(false)
+const localDataStats = ref(null)
 
 function getRedirect() {
   const target = route.query.redirect
@@ -26,12 +33,42 @@ async function onSubmit() {
   loading.value = true
   try {
     await auth.login({ username: username.value.trim(), password: password.value })
+    // IndexedDB 不分账号：本地残留其他账号/离线数据时，先让用户决定是否合并，再进入应用
+    const stats = await getLocalDataStats()
+    const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
+    if (hasData && getLocalDataOwner() !== auth.username) {
+      // 决策前暂停后台自动同步，防止切前台/网络恢复触发的同步抢先把残留数据推给新账号
+      pauseAutoSync()
+      localDataStats.value = stats
+      showLocalDataModal.value = true
+      return
+    }
+    // 无学习数据冲突，但设置可能仍是其他账号的残留（如会话过期后换号）→
+    // 先重置为默认，再拉取当前账号的云端设置，避免旧设置串库/回传
+    if (getLocalDataOwner() !== auth.username) {
+      await settingsStore.resetSettings()
+    }
+    setLocalDataOwner(auth.username)
+    await auth.syncSettingsAfterLogin()
+    // 登录后立即全量同步（拉取云端数据到本地），不等定时任务；失败不阻塞进入应用
+    await syncAfterLogin()
     router.push(getRedirect())
   } catch (e) {
     error.value = readableError(e)
   } finally {
     loading.value = false
   }
+}
+
+function onLocalDataDone() {
+  showLocalDataModal.value = false
+  resumeAutoSync()
+  router.push(getRedirect())
+}
+
+function onLocalDataCancel() {
+  showLocalDataModal.value = false
+  resumeAutoSync()
 }
 
 onMounted(() => {
@@ -108,5 +145,13 @@ onMounted(() => {
         </p>
       </div>
     </div>
+
+    <LocalDataModal
+      v-if="showLocalDataModal && localDataStats"
+      :open="true"
+      :stats="localDataStats"
+      @done="onLocalDataDone"
+      @cancel="onLocalDataCancel"
+    />
   </div>
 </template>

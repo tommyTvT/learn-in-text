@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { Send, X } from 'lucide-vue-next'
+import { Send, X, ChevronDown } from 'lucide-vue-next'
 import { chatAboutSelection } from '../../services/ai'
 
 const props = defineProps({
@@ -10,22 +10,15 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
-// 语法解析类快捷问题（点击即发送）
-const quickQuestions = [
-  '解析这句话的语法结构',
-  '分析句子成分（主谓宾定状补）',
-  '这句话的时态和语态是什么，为什么？',
-  '讲解其中的重点词组和搭配'
-]
-
+// ---- 追问对话（句子成分解析已在划词翻译弹窗内默认展示，此处仅追问） ----
 const messages = ref([]) // [{ role: 'user' | 'assistant', content }]
 const input = ref('')
 const sending = ref(false)
 const sendingError = ref(false)
-const textExpanded = ref(false)
 
 const listRef = ref(null)
 const inputRef = ref(null)
+const showSource = ref(true) // 原文区可折叠，追问后可收起腾出纵向空间
 
 let ctrl = null // 进行中请求的 AbortController
 let alive = true // 卸载守卫：组件卸载后不再更新状态
@@ -86,8 +79,8 @@ function send(question) {
 async function sendToAI() {
   sending.value = true
   sendingError.value = false
-  // 历史不含本轮刚加入的用户消息
-  const history = messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+  // 对话历史含本轮刚加入的用户消息，由服务端拼装完整多轮上下文
+  const history = messages.value.map(m => ({ role: m.role, content: m.content }))
   messages.value.push({ role: 'assistant', content: '' })
   const assistantIndex = messages.value.length - 1
   await scrollToBottom()
@@ -137,7 +130,10 @@ function handleEsc(e) {
 
 onMounted(() => {
   document.addEventListener('keydown', handleEsc)
-  inputRef.value?.focus()
+  // 移动端不自动聚焦输入框，避免键盘挡住对话区
+  if (window.matchMedia('(pointer: fine)').matches) {
+    inputRef.value?.focus()
+  }
 })
 
 onUnmounted(() => {
@@ -150,13 +146,15 @@ onUnmounted(() => {
 <template>
   <div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
     <div class="absolute inset-0 bg-black/40" @click="close"></div>
-    <div class="relative w-full sm:max-w-2xl bg-white dark:bg-neutral-900 rounded-t-2xl sm:rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 flex flex-col h-[90vh] sm:h-auto sm:max-h-[80vh]">
+    <div
+      class="relative w-full sm:max-w-3xl lg:max-w-4xl bg-white dark:bg-neutral-900 rounded-t-2xl sm:rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 flex flex-col h-[90vh] sm:h-auto sm:max-h-[80vh]"
+    >
       <div class="flex justify-center pt-2 sm:hidden">
         <div class="w-10 h-1 rounded-full bg-gray-300 dark:bg-neutral-700"></div>
       </div>
 
       <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-neutral-800">
-        <h3 class="text-base font-bold text-gray-900 dark:text-neutral-100">追问解析</h3>
+        <h3 class="text-base font-bold text-gray-900 dark:text-neutral-100">语法追问</h3>
         <button
           @click="close"
           class="p-1 -m-1 text-gray-400 hover:text-gray-600 dark:hover:text-neutral-200"
@@ -167,35 +165,36 @@ onUnmounted(() => {
       </div>
 
       <div class="px-4 pt-3">
-        <div class="bg-gray-50 dark:bg-neutral-800/60 rounded-md px-3 py-2">
+        <!-- 原文（可折叠；展开时限高滚动，追问上下文） -->
+        <button
+          @click="showSource = !showSource"
+          class="flex items-center gap-1 text-xs text-gray-400 dark:text-neutral-500 hover:text-gray-600 dark:hover:text-neutral-300"
+        >
+          <ChevronDown
+            class="w-3.5 h-3.5 transition-transform"
+            :class="showSource ? '' : '-rotate-90'"
+          />
+          原文
+        </button>
+        <div v-show="showSource" class="mt-2 bg-gray-50 dark:bg-neutral-800/60 rounded-md px-3 py-2">
           <p
-            class="text-sm text-gray-600 dark:text-neutral-300 whitespace-pre-wrap break-words"
-            :class="{ 'line-clamp-2': !textExpanded }"
+            class="text-sm text-gray-600 dark:text-neutral-300 whitespace-pre-wrap break-words max-h-32 overflow-y-auto"
           >{{ text }}</p>
-          <button
-            v-if="(text || '').length > 120"
-            @click="textExpanded = !textExpanded"
-            class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 mt-1"
-          >{{ textExpanded ? '收起' : '展开全文' }}</button>
         </div>
       </div>
 
       <div ref="listRef" class="flex-1 overflow-y-auto px-4 py-3 min-h-0">
-        <div v-if="messages.length === 0" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <button
-            v-for="q in quickQuestions"
-            :key="q"
-            @click="send(q)"
-            class="text-left text-sm px-3 py-2 rounded-lg border border-gray-200 dark:border-neutral-700 text-gray-700 dark:text-neutral-300 hover:border-blue-400 dark:hover:border-blue-500 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
-          >{{ q }}</button>
+        <div v-if="messages.length === 0" class="h-full flex items-center justify-center text-sm text-gray-400 dark:text-neutral-500">
+          针对上方原文输入问题，开始追问
         </div>
         <div v-else class="space-y-3">
           <template v-for="(m, i) in messages" :key="i">
             <div v-if="m.role === 'user'" class="flex justify-end">
               <div class="max-w-[85%] bg-blue-600 text-white rounded-2xl rounded-br-md px-3 py-2 text-sm whitespace-pre-wrap break-words">{{ m.content }}</div>
             </div>
-            <div v-else class="flex justify-start">
-              <div class="max-w-[90%] bg-gray-100 dark:bg-neutral-800 text-gray-800 dark:text-neutral-200 rounded-2xl rounded-bl-md px-3 py-2 text-sm whitespace-pre-wrap break-words">
+            <div v-else class="w-full">
+              <!-- AI 回复改为全宽阅读区样式：长解释不塞气泡，提高可读性 -->
+              <div class="w-full bg-gray-100 dark:bg-neutral-800 text-gray-800 dark:text-neutral-200 rounded-2xl rounded-bl-md px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words">
                 <template v-if="m.content">
                   <template v-for="(part, j) in parseHighlightParts(m.content)" :key="j">
                     <span v-if="part.highlight" class="font-medium text-blue-600 dark:text-blue-400">{{ part.text }}</span>
