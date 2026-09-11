@@ -1,0 +1,297 @@
+/* 分项导入 Tailwind 4：theme/base 保持分层，但 utilities 不分层（不加 layer()）。
+   原因：CSS Cascade Layers 规范中「未分层样式」无条件压过「分层样式」。
+   uni-app 运行时注入的 base.css（`* { margin: 0 }`、body 背景色等）是未分层的，
+   若 Tailwind utilities 放在 @layer utilities 里会被它们整体压制，
+   表现为 mx-auto 不居中、间距失效、配色被覆盖。utilities 不分层后，
+   按正常 specificity 竞争，类选择器(0,1,0)稳定压过 * 与元素选择器。 */
+@layer theme, base;
+@import "tailwindcss/theme" layer(theme);
+@import "tailwindcss/preflight" layer(base);
+@import "tailwindcss/utilities";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================
+   全局文字刻度：界面元素的字号已直接按「旧版 175% 的效果」写入
+   （即根字号保持 100%=16px 时各 text-* 工具类的实际像素值）。
+   - 正文类（xs/sm/base）精确对应旧版 175% 的像素（×1.75）
+   - 标题类（lg~3xl）相对收窄，避免大标题过大不协调
+   ============================================================ */
+@theme {
+  /*            字号          行高      （旧版 175% 下像素） */
+  --text-xs:   1.3125rem;  /* 21px      12px×1.75 */
+  --text-xs--line-height: 1.875rem;
+  --text-sm:   1.5rem;     /* 24px      14px×1.75 */
+  --text-sm--line-height: 2.125rem;
+  --text-base: 1.75rem;    /* 28px      16px×1.75（正文基准） */
+  --text-base--line-height: 2.5rem;
+  --text-lg:   1.875rem;   /* 30px      18px×1.75≈31.5，收窄 */
+  --text-lg--line-height: 2.625rem;
+  --text-xl:   2rem;       /* 32px      20px×1.75=35，收窄 */
+  --text-xl--line-height: 2.75rem;
+  --text-2xl:  2.25rem;    /* 36px      24px×1.75=42，收窄 */
+  --text-2xl--line-height: 3rem;
+  --text-3xl:  2.5rem;     /* 40px      30px×1.75=52.5，大幅收窄 */
+  --text-3xl--line-height: 3.25rem;
+}
+
+:root {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* 根字号固定 100%（=16px）。界面默认即呈现旧版 175% 的放大效果，
+     因为 @theme 已把各 text-* 的 rem 值按 ×1.75 写死。
+     字号设置已移除，改为通过下方媒体查询按屏幕尺寸自适应。 */
+  font-size: 100%;
+  line-height: 1.5;
+  font-weight: 400;
+  color-synthesis: none;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: light dark;
+}
+
+/* ============================================================
+   页面尺寸自适应：小屏（手机）下等比下调根字号，
+   保证 175% 放大基准的文字在窄屏上不溢出、每行字符数合理。
+   ============================================================ */
+@media (max-width: 640px) {
+  :root {
+    font-size: 90%;
+  }
+}
+@media (max-width: 380px) {
+  :root {
+    font-size: 84%;
+  }
+}
+
+body {
+  /* 未显式指定 text-* 的正文（如文章阅读内容）也按 175 效果的基准字号渲染 */
+  font-size: var(--text-base);
+  margin: 0;
+  min-height: 100dvh;
+  /* 始终保留纵向滚动条占位，避免页面切换时滚动条出现/消失造成的宽度跳动与违和感 */
+  overflow-y: scroll;
+  /* 阻止横向溢出 */
+  overflow-x: hidden;
+}
+
+#app {
+  min-height: 100dvh;
+}
+
+/* ============================================================
+   页面切换入场动画
+   uni-app H5 无内置翻页动画（框架不提供 uni-page-enter 类），
+   原版 vue-router 的 depth/order 方向判断在此用 CSS 动画等效替代：
+   新页面从右侧整页滑入（push 观感），bare 页（登录/注册/邮箱验证）淡入。
+   仅用 transform + opacity，GPU 加速、移动端流畅。
+   ============================================================ */
+/* 注意：to 帧刻意不写 transform，动画结束后 fill 保留的是 transform:none，
+   避免残留的非 none transform 永久创建 containing block，
+   破坏内部 position:fixed 弹窗 / 划词气泡的定位基准。 */
+@keyframes page-slide-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes page-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.page-anim-slide {
+  animation: page-slide-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.page-anim-fade {
+  animation: page-fade-in 0.16s ease both;
+}
+
+/* 无障碍：尊重「减少动态效果」偏好，退化为纯淡入 */
+@media (prefers-reduced-motion: reduce) {
+  .page-anim-slide {
+    animation: page-fade-in 0.12s ease both;
+  }
+}
+
+/* ============================================================
+   覆盖 uni-app H5 内置组件的默认样式
+   原因：uni-app 编译器把模板里的 <button>/<input>/<textarea>
+   转成 <uni-button>/<uni-input>/<uni-textarea> 组件，并注入
+   line-height:2.55555556、overflow:hidden、默认边框/背景/字号等，
+   与 Tailwind utility 类冲突，表现为按钮文字被裁切、输入框变形。
+   这里把这些组件"还原"成无样式容器，交由 Tailwind 类接管。
+   选择器用 `uni-app uni-xxx`（specificity 0,0,2），且本文件在
+   框架样式之后加载，可稳定覆盖组件默认样式；而源码上的
+   Tailwind 类（0,1,0）优先级更高，仍能覆盖此处，互不打架。
+   ============================================================ */
+
+/* 恢复文本选择：uni base.css 的 html,body{user-select:none} 会破坏划词翻译。
+   不用 !important——那会连带压过 Reader 移动端 inline 的 user-select:none
+   （自定义长按划词依赖它）与 .select-none 类。
+   改用 `html:root` 把 specificity 提到 (0,1,1)，恰好压过 uni 的 (0,0,1) 元素选择器。
+   子元素上的 select-none 类 / inline 样式是「直接命中」，仍优先于「继承值」，不受影响。 */
+html:root,
+html:root body {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* 中和 uni base.css 在「系统深色模式」下注入的 body/uni-page-body 背景与文字色：
+   `@media (prefers-color-scheme: dark){ body, uni-page-body { background-color: var(--UI-BG-0); color: var(--UI-FG-0) } }`
+   它按系统偏好生效、不跟随应用内主题开关（.dark 类），会在「系统深色 + 应用浅色」
+   时把未显式指定颜色的文字变成白色（浅底白字看不见）。
+   背景统一交给 PageLayout 根 div 的 bg-gray-50 dark:bg-neutral-950 承担。 */
+html:root body,
+html:root uni-page,
+html:root uni-page-body {
+  background-color: transparent;
+  color: inherit;
+}
+
+/* display/text-align 对齐浏览器 UA 对原生 <button> 的默认值（inline-block + 居中），
+   而非 inline-flex——避免把子节点变成 flex item 改变原版 Vue 里的 inline 流排布。
+   源码中带 flex 类的按钮由 Tailwind 类（specificity 0,1,0 > 0,0,2）自行覆盖。 */
+uni-app uni-button {
+  display: inline-block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  background-image: none;
+  box-sizing: border-box;
+  font-size: inherit;
+  line-height: inherit;
+  font-family: inherit;
+  font-weight: inherit;
+  color: inherit;
+  text-align: center;
+  text-decoration: none;
+  overflow: visible;
+  cursor: pointer;
+  white-space: normal;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* 中和 uni button.css 的浅色主题变体（运行时注入，不跟随应用内 .dark 主题）：
+   - [disabled] 系列给 #f7f7f7 白底 + 黑字，specificity (0,2,1) 压过 Tailwind 的
+     dark:bg-* (0,1,0)，深色模式下 disabled 按钮一片惨白（词库页三个操作钮）
+   - .button-hover 是 uni 运行时 JS 在按压/悬停时动态添加的类（#dedede 浅灰底），
+     同样不跟随主题，表现为"点击激活处白色"
+   - :after 伪元素给每个按钮画一圈 rgba(0,0,0,.2) 黑边（小程序风格） */
+uni-app uni-button[type='default'],
+uni-app uni-button[disabled],
+uni-app uni-button[disabled][type='default'],
+uni-app uni-button[disabled]:not([type]) {
+  background-color: transparent;
+  color: inherit;
+}
+
+uni-app uni-button:after {
+  content: none;
+}
+
+uni-app uni-button.button-hover,
+uni-app uni-button.button-hover[type='default'] {
+  background-color: transparent;
+  color: inherit;
+}
+
+/* 宿主层：还原成无装饰的块容器，尺寸/内边距交给源码上的 Tailwind 类。
+   用 `uni-app uni-input`（0,0,2）压过库的 `uni-input`（0,0,1）元素选择器。 */
+uni-app uni-input,
+uni-app uni-textarea {
+  display: block;
+  position: relative;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  box-sizing: border-box;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+  overflow: visible;
+}
+
+/* 内部实现层：库把真实的 <input>/<textarea> 设为 absolute + height:100%，
+   高度完全依赖宿主显式值、忽略 rows，宿主改 auto 后就坍塌成 0px。
+   这里把它们还原成 static + height:auto，让原生 intrinsic 高度
+   （textarea 的 rows、input 的单行）生效。
+   ⚠️ 关键属性全部 !important：uni 还会运行时注入 uvue.css
+   （`uni-app uni-input>.uni-input-wrapper { flex:1 }` 等，(0,1,2) 同权重但后注入），
+   不加 !important 会被它反杀，display 变 flex 后高度链再次失稳。 */
+uni-app uni-input .uni-input-wrapper,
+uni-app uni-textarea .uni-textarea-wrapper {
+  position: static !important;
+  display: block !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: visible !important;
+}
+
+uni-app uni-input .uni-input-input {
+  position: static !important;
+  display: block !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 1.5em;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  outline: none !important;
+  background: transparent !important;
+  font-size: inherit !important;
+  font-family: inherit !important;
+  line-height: inherit !important;
+  color: inherit !important;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+uni-app uni-textarea .uni-textarea-textarea {
+  position: static !important;
+  display: block !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  outline: none !important;
+  background: transparent !important;
+  font-size: inherit !important;
+  font-family: inherit !important;
+  line-height: inherit !important;
+  color: inherit !important;
+  resize: vertical;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* 占位层对齐：placeholder 保持库的 absolute + top:auto（静态位置对齐输入文字），
+   但锁死行高继承，避免宿主行高变化时占位文字错位 */
+uni-app uni-input .uni-input-placeholder,
+uni-app uni-textarea .uni-textarea-placeholder {
+  line-height: inherit !important;
+}
