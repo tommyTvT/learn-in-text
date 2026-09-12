@@ -521,18 +521,19 @@ async function loadWordDetails(word, occKey) {
     if (requestId !== wordDetailRequestId) return
     wordInfo.value = wordData
     contextTranslation.value = cached?.translation || null
-    // 词义与「在文中」同步加载：二者互不依赖（前者只更新 words.definitions，后者只写
-    // contextTranslations），并行发起可让两段内容几乎同时到达；顺序 await 会让上下文
-    // 请求白等一次单词释义请求，弹窗里两段内容一前一后出现。
-    // 注意两点：
-    // 1. wordData 已在此取好并透传，避免两个分支各自 getOrCreate 同一新词并发写库；
-    // 2. 不在这里判断缓存命中，交给 loadContextTranslation 内部复用其自身的缓存查询，
-    //    缓存存在时它直接返回、不发请求。
+    // 词义与「在文中」同时加载：二者互不依赖（前者只更新 words.definitions，后者只写
+    // contextTranslations），并行可让两段内容几乎同时到达。注意三点：
+    // 1. 必须统一 await（Promise.all），不能只 await 其中一支：两支各自完成后都会写
+    //    自己的状态，「在文中」先完成就更早渲染，无需等另一方；但只 await 词义会让本函数
+    //    的收尾（下方 finally）多等一次请求，弹窗切换/关闭的清理被无谓拖慢；
+    // 2. wordData 已在此取好并透传，避免两个分支各自 getOrCreate 同一新词并发写库；
+    // 3. 不在这里判断上下文缓存命中，交给 loadContextTranslation 内部复用其自身的缓存
+    //    查询，缓存存在时它直接返回、不发请求。
     const basicInfoPromise = wordData.definitions?.length
       ? Promise.resolve()
       : generateBasicInfo(word, requestId, wordData)
-    loadContextTranslation(word, occKey, requestId, wordData)
-    await basicInfoPromise
+    const contextPromise = loadContextTranslation(word, occKey, requestId, wordData)
+    await Promise.all([basicInfoPromise, contextPromise])
   } finally {
     if (requestId === wordDetailRequestId) {
       loadingWord.value = false
@@ -612,8 +613,14 @@ async function loadContextTranslation(word, occKey, requestId, wordData = null) 
   loadingContext.value = true
   try {
     // context：目标词所在句及前后各一句，供 AI 理解语境；用 <w> 标记本次选中的那次出现（词可能重复出现）
-    const { markedContext } = getWordSentenceWithContext(article.value.content, word, getOccurrence(occKey))
-    const result = await generateWordContextTranslation(word, markedContext)
+    const { markedContext, context } = getWordSentenceWithContext(article.value.content, word, getOccurrence(occKey))
+    // 定位失败（markedContext 为空）时退回未标记的语境：system 承诺语境里有 <w> 标记，
+    // 只传空串会让模型无从判断，不如给它真实语境（丢了标记，但至少有判断依据）
+    const contextText = markedContext || context
+    if (!contextText) {
+      throw new Error('未能在文章中找到该单词的语境')
+    }
+    const result = await generateWordContextTranslation(word, contextText)
     if (requestId !== wordDetailRequestId) return
     if (!result.contextTranslation) {
       throw new Error('释义结果为空')
@@ -634,7 +641,10 @@ async function loadContextTranslation(word, occKey, requestId, wordData = null) 
 
 function retryContextTranslation() {
   if (!selectedWord.value) return
-  loadContextTranslation(selectedWord.value, selectedOccKey.value, wordDetailRequestId)
+  // 重试时没有现成的单词记录可复用（第 4 参传 null 让它自己取）；
+  // 第 3 参必须是当前请求序号而不是被当成 wordData 传进去 —— 传错位置会让
+  // `wordData || await getOrCreateWord(...)` 短路成一个数字，取不到记录。
+  loadContextTranslation(selectedWord.value, selectedOccKey.value, wordDetailRequestId, null)
 }
 
 function closePopup() {

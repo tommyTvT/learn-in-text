@@ -224,7 +224,7 @@ export function parseArticle(text: string): ParsedArticle {
 }
 
 export function getWordContext(text: string, word: string, maxWords = 0, occurrence = 0): string {
-  const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
+  const wordRegex = new RegExp(`\\b${escapeRegExp(word)}\\b`, 'gi')
   let match: RegExpExecArray | null
   let count = 0
   let wordIndex = -1
@@ -280,7 +280,7 @@ export function getWordSentenceWithContext(
   occurrence = 0,
   extraSentences = 1
 ): { sentence: string; context: string; markedContext: string } {
-  const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
+  const wordRegex = new RegExp(`\\b${escapeRegExp(word)}\\b`, 'gi')
   let match: RegExpExecArray | null
   let count = 0
   let wordIndex = -1
