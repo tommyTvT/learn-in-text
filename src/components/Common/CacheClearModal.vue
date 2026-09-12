@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { ref, computed, watch } from 'vue'
 import { X, LoaderCircle, Trash2, FileText, CheckSquare, Square } from 'lucide-vue-next'
 import { cacheService, articleService } from '../../services/db'
@@ -102,7 +102,7 @@ async function handleClear() {
   const scopeText = articleScope.value === 'all'
     ? '全部文章'
     : `选中的 ${selectedArticleIds.value.length} 篇文章`
-  if (!await confirmDialog(`确定清除「${typeLabels}」（${scopeText}）吗？\n清除后相关内容会在再次使用时重新生成，单词标记不受影响。`)) return
+  if (!await confirmDialog(`确定清除「${typeLabels}」（${scopeText}）吗？\n清除后相关内容会在再次使用时重新生成，单词标记不受影响。`, '确认', { destructive: true })) return
 
   clearing.value = true
   error.value = ''

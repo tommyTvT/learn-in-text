@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { onMounted, onBeforeUnmount, nextTick, ref, watch } from 'vue'
 import { useRouter, usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
@@ -293,7 +293,7 @@ function openArticle(id) {
 
 async function deleteArticle(id, event) {
   event.stopPropagation()
-  if (!await confirmDialog('确定要删除这篇文章吗？')) return
+  if (!await confirmDialog('确定要删除这篇文章吗？', '确认', { destructive: true })) return
   try {
     await articleStore.deleteArticle(id)
     await toast('文章已删除')

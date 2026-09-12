@@ -47,7 +47,7 @@ function handleAddProvider() {
 }
 async function handleRemoveProvider(id) {
   const provider = settingsStore.providers.find(p => p.id === id)
-  if (!await confirmDialog(`确定删除供应商「${provider?.name}」吗？其 API Key 配置将一并删除。`)) return
+  if (!await confirmDialog(`确定删除供应商「${provider?.name}」吗？其 API Key 配置将一并删除。`, '确认', { destructive: true })) return
   settingsStore.removeProvider(id)
   if (activeProviderId.value === id) {
     activeProviderId.value = settingsStore.providers[0]?.id || ''

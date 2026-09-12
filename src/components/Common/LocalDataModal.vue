@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { ref, computed } from 'vue'
 import { useAuthStore } from '../../stores/auth'
 import { useSettingsStore } from '../../stores/settings'
@@ -91,7 +91,7 @@ async function handleExportClear() {
 
 async function handleClear() {
   if (busy.value) return
-  if (!await confirmDialog('直接清除后本地数据将无法恢复（不影响云端数据）。确定清除吗？')) return
+  if (!await confirmDialog('直接清除后本地数据将无法恢复（不影响云端数据）。确定清除吗？', '确认', { destructive: true })) return
   busy.value = true
   busyText.value = '正在清除本地数据...'
   error.value = ''

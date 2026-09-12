@@ -151,7 +151,7 @@ async function handleSyncSettings() {
 }
 
 async function handleClearCloud() {
-  if (!await confirmDialog('确定要清除该用户名在云端的所有数据吗？此操作不可恢复。')) return
+  if (!await confirmDialog('确定要清除该用户名在云端的所有数据吗？此操作不可恢复。', '确认', { destructive: true })) return
   cloudClearing.value = true
   devCloudResult.value = null
   try {

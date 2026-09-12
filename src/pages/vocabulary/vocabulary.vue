@@ -154,7 +154,9 @@ async function deleteSelected() {
   // 会一并删除，确认文案必须说明影响范围（原文案只报个数，会误导用户）
   if (!await confirmDialog(
     `确定删除选中的 ${count} 个单词吗？\n\n` +
-    '注意：删除按单词拼写生效，该单词在其它文章中标记的记录、释义与语境翻译也会一并删除，且无法恢复。'
+    '注意：删除按单词拼写生效，该单词在其它文章中标记的记录、释义与语境翻译也会一并删除，且无法恢复。',
+    '确认',
+    { destructive: true }
   )) return
 
   deleting.value = true
