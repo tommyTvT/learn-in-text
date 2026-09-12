@@ -2,8 +2,8 @@
 import { ref, computed, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
 import { useDialogA11y } from '../../composables/useDialogA11y'
-import { fetchModels, testConnection } from '../../services/ai'
-import { X, ChevronDown, Loader2 } from 'lucide-vue-next'
+import { testConnection } from '../../services/ai'
+import { X, ChevronDown } from 'lucide-vue-next'
 
 const props = defineProps({
   open: {
@@ -64,75 +64,89 @@ async function handleTestConnection() {
   }
 }
 
-// ---- 模型列表获取（针对当前所选供应商） ----
-const modelList = ref([])
-const modelsLoading = ref(false)
-const modelsError = ref('')
+// ---- 模型列表：直接读取供应商配置中已暴露的模型（本地存储，无需在线拉取） ----
 const modelDropdownOpen = ref(false)
 const modelFilter = ref('')
+// true = 通过「展示模型列表」按钮打开，显示全量不过滤；
+// 点击/输入输入框时恢复为按输入内容过滤的默认模式
+const showAllModels = ref(false)
 
-const filteredModels = computed(() => {
-  const keyword = modelFilter.value.trim().toLowerCase()
-  if (!keyword) return modelList.value
-  return modelList.value.filter(m => m.toLowerCase().includes(keyword))
+/** 当前所选供应商已暴露的模型列表（undefined = 未配置，视为全部暴露但本地无列表） */
+const exposedModels = computed(() => {
+  const p = settingsStore.providers.find(x => x.id === config.value.providerId)
+  return Array.isArray(p?.exposedModels) ? p.exposedModels : []
 })
 
-async function handleFetchModels() {
-  modelsLoading.value = true
-  modelsError.value = ''
-  modelList.value = []
-  try {
-    modelList.value = await fetchModels(config.value.providerId)
-    if (!modelList.value.length) {
-      modelsError.value = '该接口未返回可用模型列表，请手动填写模型名称'
-    } else {
-      modelFilter.value = ''
-      modelDropdownOpen.value = true
-    }
-  } catch (error) {
-    modelsError.value = '获取失败：' + error.message
-  } finally {
-    modelsLoading.value = false
+const filteredModels = computed(() => {
+  if (showAllModels.value) return exposedModels.value
+  const keyword = modelFilter.value.trim().toLowerCase()
+  if (!keyword) return exposedModels.value
+  return exposedModels.value.filter(m => m.toLowerCase().includes(keyword))
+})
+
+/** 手填模型不在暴露列表中的提示（严格遵循供应商暴露配置） */
+const unexposedWarning = computed(() => {
+  const m = model.value?.trim()
+  if (!m || !exposedModels.value.length) return ''
+  if (!exposedModels.value.includes(m)) {
+    return `模型「${m}」未在供应商配置中暴露，可能不可用`
   }
-}
+  return ''
+})
 
 function selectModel(m) {
   model.value = m
   modelDropdownOpen.value = false
+  showAllModels.value = false
 }
 
 function openModelDropdown() {
-  if (!modelList.value.length) return
-  modelFilter.value = ''
+  if (!exposedModels.value.length) return
+  showAllModels.value = false
+  modelFilter.value = model.value || ''
+  modelDropdownOpen.value = true
+}
+
+// 「展示模型列表」：显示全量已暴露模型，不按输入框内容过滤
+function toggleFullModelList() {
+  if (!exposedModels.value.length) return
+  if (showAllModels.value && modelDropdownOpen.value) {
+    modelDropdownOpen.value = false
+    showAllModels.value = false
+    return
+  }
+  showAllModels.value = true
   modelDropdownOpen.value = true
 }
 
 function onModelInput() {
   modelFilter.value = model.value
-  if (modelList.value.length) {
+  if (exposedModels.value.length) {
+    showAllModels.value = false
     modelDropdownOpen.value = true
   }
 }
 
 function closeModelDropdown() {
+  // 全量列表模式下不因输入框失焦收起（用户可能正在浏览列表），由按钮/选择/点遮罩关闭
+  if (showAllModels.value) return
   setTimeout(() => {
     modelDropdownOpen.value = false
+    showAllModels.value = false
   }, 150)
 }
 
-// 切换供应商时清空模型列表（模型属于该供应商）
+// 切换供应商时收起下拉（模型列表随供应商配置自动切换）
 watch(selectedProviderId, () => {
-  modelList.value = []
-  modelsError.value = ''
   modelDropdownOpen.value = false
+  showAllModels.value = false
   modelFilter.value = ''
 })
 
 watch(() => props.open, (val) => {
   if (val) {
-    modelList.value = []
-    modelsError.value = ''
     modelDropdownOpen.value = false
+    showAllModels.value = false
     modelFilter.value = ''
     testResult.value = null
   }
@@ -230,7 +244,7 @@ function onModelEsc(e) {
                       class="w-full px-3 py-2 pr-8 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
                     />
                     <button
-                      v-if="modelList.length"
+                      v-if="exposedModels.length"
                       @mousedown.prevent="modelDropdownOpen = !modelDropdownOpen"
                       type="button"
                       class="absolute right-2 top-1/2 -translate-y-1/2 px-1 text-gray-400 dark:text-neutral-500 hover:text-gray-600 dark:hover:text-neutral-300 cursor-pointer"
@@ -240,11 +254,11 @@ function onModelEsc(e) {
 
                     <!-- 模型下拉面板 -->
                     <div
-                      v-if="modelDropdownOpen && modelList.length"
+                      v-if="modelDropdownOpen && exposedModels.length"
                       class="absolute z-20 left-0 right-0 mt-1 max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 shadow-lg"
                     >
                       <div class="sticky top-0 px-3 py-1.5 text-xs text-gray-400 dark:text-neutral-500 bg-gray-50 dark:bg-neutral-800 border-b border-gray-100 dark:border-neutral-700">
-                        共 {{ filteredModels.length }} 个模型{{ modelFilter ? '（已过滤）' : '' }}
+                        共 {{ filteredModels.length }} 个模型{{ !showAllModels && modelFilter ? '（已过滤）' : '' }}
                       </div>
                       <button
                         v-for="m in filteredModels"
@@ -269,18 +283,19 @@ function onModelEsc(e) {
                     </div>
                   </div>
                   <button
-                    @click="handleFetchModels"
-                    :disabled="modelsLoading || !selectedProvider?.endpoint || !selectedProvider?.apiKey"
+                    @click="toggleFullModelList"
+                    :disabled="!exposedModels.length"
                     class="shrink-0 px-3 py-2 text-sm bg-gray-100 dark:bg-neutral-700 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
                   >
-                    <Loader2 v-if="modelsLoading" class="w-4 h-4 inline-block mr-1 animate-spin -mt-0.5" />
-                    {{ modelsLoading ? '获取中...' : '获取模型列表' }}
+                    {{ showAllModels && modelDropdownOpen ? '收起列表' : '展示模型列表' }}
                   </button>
                 </div>
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                  可手动填写，或从所选供应商拉取模型列表后切换选择
+                  {{ exposedModels.length
+                    ? '可从已暴露的模型列表中选择，或直接输入筛选'
+                    : '该供应商暂未在「管理供应商」中暴露模型，可手动填写模型名称' }}
                 </p>
-                <p v-if="modelsError" class="text-xs text-red-600 dark:text-red-400 mt-1">{{ modelsError }}</p>
+                <p v-if="unexposedWarning" class="text-xs text-amber-600 dark:text-amber-400 mt-1">{{ unexposedWarning }}</p>
               </div>
 
               <div class="flex items-center space-x-3">

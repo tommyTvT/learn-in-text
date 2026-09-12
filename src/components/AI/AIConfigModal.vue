@@ -1,9 +1,10 @@
-﻿<script setup>
+<script setup>
 import { ref, computed, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
 import { useDialogA11y } from '../../composables/useDialogA11y'
-import { X, Plus, Trash2, Eye, EyeOff, Bot } from 'lucide-vue-next'
+import { X, Plus, Trash2, Eye, EyeOff, Bot, Loader2, Check } from 'lucide-vue-next'
 import { alert, confirmDialog } from '../../services/dialog'
+import { fetchModels } from '../../services/ai'
 
 const props = defineProps({
   open: {
@@ -31,9 +32,11 @@ const apiKeyShown = computed(() =>
     : '••••••••'
 )
 function onApiKeyInput(e) {
-  if (activeProvider.value) {
-    activeProvider.value.apiKey = e.target.value
-  }
+  if (!activeProvider.value) return
+  // uni-app 的 <input> 编译为 uni-input，标准化事件的取值路径是
+  // e.detail.value（e.target.value 为 undefined，会把密钥写成 undefined，
+  // 导致既不生效也无法持久化）；保留 target 回退以兼容原生事件场景
+  activeProvider.value.apiKey = e.detail?.value ?? e.target?.value ?? ''
 }
 
 // ---- 供应商操作 ----
@@ -50,6 +53,95 @@ async function handleRemoveProvider(id) {
     activeProviderId.value = settingsStore.providers[0]?.id || ''
   }
 }
+
+// ---- 模型暴露管理 ----
+const allModels = ref([])
+const modelsLoading = ref(false)
+const modelsError = ref('')
+const modelSearch = ref('')
+
+/** 按搜索关键字过滤后的模型列表 */
+const displayedModels = computed(() => {
+  const keyword = modelSearch.value.trim().toLowerCase()
+  if (!keyword) return allModels.value
+  return allModels.value.filter(m => m.toLowerCase().includes(keyword))
+})
+
+async function handleFetchAllModels() {
+  if (!activeProvider.value) return
+  modelsLoading.value = true
+  modelsError.value = ''
+  allModels.value = []
+  try {
+    allModels.value = await fetchModels(activeProvider.value.id)
+    if (!allModels.value.length) {
+      modelsError.value = '该接口未返回可用模型列表'
+    } else if (!Array.isArray(activeProvider.value.exposedModels)) {
+      // 未配置（默认全部暴露）：拉取成功后初始化为全量数组，
+      // 保证勾选交互面对的是真实响应式数组
+      activeProvider.value.exposedModels = [...allModels.value]
+    }
+  } catch (error) {
+    modelsError.value = '获取失败：' + error.message
+  } finally {
+    modelsLoading.value = false
+  }
+}
+
+/** 当前供应商已暴露模型集合（undefined 表示未配置 = 全部暴露） */
+const exposedSet = computed(() => {
+  const list = activeProvider.value?.exposedModels
+  if (!Array.isArray(list)) return null
+  return new Set(list)
+})
+
+function isModelExposed(modelId) {
+  if (exposedSet.value === null) return true
+  return exposedSet.value.has(modelId)
+}
+
+function toggleModelExposure(modelId) {
+  if (!activeProvider.value) return
+  // 渲染前已保证 exposedModels 为数组（handleFetchAllModels 中初始化）
+  if (!Array.isArray(activeProvider.value.exposedModels)) {
+    activeProvider.value.exposedModels = allModels.value.filter(m => m !== modelId)
+    return
+  }
+  const idx = activeProvider.value.exposedModels.indexOf(modelId)
+  if (idx >= 0) {
+    activeProvider.value.exposedModels.splice(idx, 1)
+  } else {
+    activeProvider.value.exposedModels.push(modelId)
+  }
+}
+
+/** 批量操作作用于当前展示的模型（有搜索关键字时仅影响匹配项） */
+function exposeAllModels() {
+  if (!activeProvider.value) return
+  // 未配置（全部暴露）时无需变更
+  if (!Array.isArray(activeProvider.value.exposedModels)) return
+  const set = new Set(activeProvider.value.exposedModels)
+  for (const m of displayedModels.value) set.add(m)
+  activeProvider.value.exposedModels = [...set]
+}
+
+function unexposeAllModels() {
+  if (!activeProvider.value) return
+  const remove = new Set(displayedModels.value)
+  if (!Array.isArray(activeProvider.value.exposedModels)) {
+    // 未配置（全部暴露）时取消：以全量列表排除当前展示项作为白名单
+    activeProvider.value.exposedModels = allModels.value.filter(m => !remove.has(m))
+    return
+  }
+  activeProvider.value.exposedModels = activeProvider.value.exposedModels.filter(m => !remove.has(m))
+}
+
+// 切换供应商时重置模型列表缓存
+watch(activeProviderId, () => {
+  allModels.value = []
+  modelsError.value = ''
+  modelSearch.value = ''
+})
 
 // ---- 关闭处理 ----
 function handleOverlayClick() {
@@ -218,6 +310,76 @@ watch(() => props.open, (val) => {
                   <p v-if="activeProvider.preset" class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
                     预设供应商只需填写 API Key，接口地址已自动配置
                   </p>
+                </div>
+
+                <!-- 模型暴露管理 -->
+                <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300">暴露给用户的模型</label>
+                    <button
+                      @click="handleFetchAllModels"
+                      :disabled="modelsLoading || !activeProvider.endpoint || !activeProvider.apiKey"
+                      class="px-2.5 py-1 text-xs bg-gray-100 dark:bg-neutral-700 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer inline-flex items-center gap-1"
+                    >
+                      <Loader2 v-if="modelsLoading" class="w-3 h-3 animate-spin" />
+                      {{ modelsLoading ? '获取中...' : '获取模型列表' }}
+                    </button>
+                  </div>
+                  <p class="text-xs text-gray-500 dark:text-neutral-400 mb-2">
+                    {{ activeProvider.exposedModels === undefined || activeProvider.exposedModels === null
+                      ? '未配置勾选：当前所有模型均对用户可见'
+                      : `已暴露 ${activeProvider.exposedModels.length} 个模型，用户仅能选择已勾选的模型` }}
+                  </p>
+
+                  <template v-if="allModels.length">
+                    <input
+                      v-model="modelSearch"
+                      type="text"
+                      placeholder="搜索模型名称..."
+                      class="w-full px-3 py-1.5 mb-2 text-sm border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
+                    />
+                    <div class="flex items-center justify-between gap-3 mb-2 text-xs">
+                      <div class="flex items-center gap-3">
+                        <button @click="exposeAllModels" class="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer">{{ modelSearch.trim() ? '暴露匹配项' : '全部暴露' }}</button>
+                        <button @click="unexposeAllModels" class="text-gray-500 dark:text-neutral-400 hover:underline cursor-pointer">{{ modelSearch.trim() ? '取消匹配项' : '全部取消' }}</button>
+                      </div>
+                      <span class="text-gray-400 dark:text-neutral-500">
+                        {{ modelSearch.trim() ? `匹配 ${displayedModels.length} / ${allModels.length}` : `共 ${allModels.length}` }}
+                      </span>
+                    </div>
+                    <div class="max-h-56 overflow-y-auto rounded-lg border border-gray-200 dark:border-neutral-700 divide-y divide-gray-100 dark:divide-neutral-800">
+                      <!-- 不使用原生 checkbox：uni-app 会将其编译为 uni-input，
+                           原生勾选行为失效；勾选状态完全由 exposedModels 派生 -->
+                      <button
+                        v-for="m in displayedModels"
+                        :key="m"
+                        type="button"
+                        @click="toggleModelExposure(m)"
+                        role="checkbox"
+                        :aria-checked="isModelExposed(m)"
+                        class="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800"
+                      >
+                        <span
+                          :class="[
+                            'w-4 h-4 shrink-0 rounded border flex items-center justify-center transition-colors',
+                            isModelExposed(m)
+                              ? 'bg-blue-600 border-blue-600 text-white'
+                              : 'bg-white dark:bg-neutral-700 border-gray-300 dark:border-neutral-600'
+                          ]"
+                        >
+                          <Check v-if="isModelExposed(m)" class="w-3 h-3" />
+                        </span>
+                        <span class="truncate text-gray-800 dark:text-neutral-200">{{ m }}</span>
+                      </button>
+                      <div
+                        v-if="!displayedModels.length"
+                        class="px-3 py-3 text-sm text-gray-400 dark:text-neutral-500 text-center"
+                      >
+                        没有匹配「{{ modelSearch }}」的模型
+                      </div>
+                    </div>
+                  </template>
+                  <p v-if="modelsError" class="text-xs text-red-600 dark:text-red-400 mt-1">{{ modelsError }}</p>
                 </div>
 
                 <div v-if="!activeProvider.preset" class="flex justify-end">

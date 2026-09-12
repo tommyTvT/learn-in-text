@@ -63,6 +63,12 @@ function createPresetProvider(presetKey: string): Provider {
   }
 }
 
+/** 规范化暴露模型列表：非数组视为未配置（undefined = 默认全部暴露） */
+function normalizeExposedModels(raw: any): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  return raw.filter((m: any) => typeof m === 'string')
+}
+
 /** 供应商（共享资源池）只保留连接信息，模型选择下放到「文本模型 / 视觉模型」配置 */
 function normalizeProvider(raw: any): Provider | null {
   if (!raw || typeof raw !== 'object') return null
@@ -71,14 +77,15 @@ function normalizeProvider(raw: any): Provider | null {
     if (!PRESET_PROVIDERS[raw.preset]) return null
     // 预设供应商的端点始终跟随预设定义，仅 apiKey 允许用户自定义
     const base = createPresetProvider(raw.preset)
-    return { ...base, apiKey: raw.apiKey || '' }
+    return { ...base, apiKey: raw.apiKey || '', exposedModels: normalizeExposedModels(raw.exposedModels) }
   }
   return {
     id: raw.id || 'custom-' + Date.now().toString(36) + '-' + (++providerSeq),
     name: raw.name || '自定义供应商',
     preset: null,
     endpoint: raw.endpoint || '',
-    apiKey: raw.apiKey || ''
+    apiKey: raw.apiKey || '',
+    exposedModels: normalizeExposedModels(raw.exposedModels)
   }
 }
 

@@ -22,6 +22,12 @@ export interface Provider {
   preset: string | null
   endpoint: string
   apiKey: string
+  /**
+   * 暴露给用户的模型 id 列表（供应商管理中勾选）。
+   * undefined = 未配置，默认全部模型可暴露（兼容存量配置）；
+   * 数组（含空数组）= 仅列表内的模型出现在用户可选模型列表中。
+   */
+  exposedModels?: string[]
 }
 
 /** 模型配置：文本 / 视觉各自独立选择供应商与模型名 */
