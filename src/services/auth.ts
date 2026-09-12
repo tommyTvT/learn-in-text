@@ -112,6 +112,13 @@ export function validateEmail(email: string | undefined): string {
   return ''
 }
 
+/** 校验登录标识（用户名或邮箱）：非空即可，具体格式由服务端解析 */
+export function validateIdentifier(identifier: string | undefined): string {
+  const value = (identifier || '').trim()
+  if (!value) return '请输入用户名或邮箱'
+  return ''
+}
+
 /** 校验密码长度 */
 export function validatePassword(password: string | undefined): string {
   if (!password) return '请输入密码'
@@ -119,15 +126,35 @@ export function validatePassword(password: string | undefined): string {
   return ''
 }
 
-/** 登录：邮箱 + 密码。
- * 测试阶段注册已下线，账号由管理员在 Supabase 控制台手动创建，
- * 不再做「用户名 → 邮箱」解析（该匿名 RPC 会向未认证调用者泄露任意用户邮箱）。
+/** 登录（用户名或邮箱 + 密码）。
+ * Supabase Auth 只认邮箱：输入不含 @ 时先调用 resolve_login_identifier
+ * 把用户名解析为注册邮箱（见 migrations/0013），解析失败统一按「用户名或密码错误」
+ * 处理，避免暴露账号是否存在。
  */
-export async function login({ email, password }: { email: string; password: string }) {
+export async function login({ identifier, password }: { identifier: string; password: string }) {
   const supabase = getSupabase()
 
+  let email = identifier.trim()
+  let resolveFailed = false
+  if (!email.includes('@')) {
+    const { data, error: resolveError } = await supabase.rpc('resolve_login_identifier', {
+      identifier: email
+    })
+    if (resolveError || !data) {
+      // 解析不到邮箱（用户不存在/未绑定邮箱）时不直接报错，
+      // 用一个不可能存在的邮箱走 signInWithPassword，保证错误提示一致
+      email = 'invalid@invalid.invalid'
+      resolveFailed = true
+    } else {
+      email = String(data)
+    }
+  }
+
   const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-  if (error) throw new Error(readableError(error))
+  if (error) {
+    if (resolveFailed) throw new Error('用户名或密码错误')
+    throw new Error(readableError(error))
+  }
 
   return { session: data.session, user: data.user }
 }

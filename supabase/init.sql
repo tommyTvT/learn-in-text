@@ -2,7 +2,7 @@
 -- LearnInText 云数据库一键初始化（全量基线）
 -- ============================================================================
 -- 用途：全新 Supabase 项目只需在 Dashboard → SQL Editor 执行本文件一次，
---       等价于按顺序执行 migrations/0001 ~ 0012 的最终累积状态。
+--       等价于按顺序执行 migrations/0001 ~ 0013 的最终累积状态。
 -- 幂等：可重复执行，不会删除已有数据；在已按迁移链初始化过的库上执行也安全
 --       （会顺带完成收尾：profiles 开启 RLS、回收 anon 全部表权限、
 --        删除注册专用 RPC 并收紧 security definer 函数授权）。
@@ -11,11 +11,12 @@
 -- 与迁移链的差异（均为修复/收紧，不影响功能）：
 --   * 显式 alter table public.profiles enable row level security（原迁移链缺失，
 --     导致 profiles 上的策略不生效，存在匿名读取用户名/邮箱的风险）
---   * 业务表权限仅授予 authenticated，并回收 anon（匿名不保留任何表权限与 RPC）
---   * 对齐 0012：登录收紧为「邮箱直登」——注册已下线，账号由管理员在控制台
---     手动创建；删除注册专用 RPC username_exists 与 resolve_login_identifier
---     （后者曾允许匿名调用者按用户名换取任意用户邮箱），set_username /
---     auth_username 仅 authenticated 可执行
+--   * 业务表权限仅授予 authenticated，并回收 anon（匿名不保留任何表权限；
+--     仅 resolve_login_identifier 这一个 RPC 对 anon 开放，供用户名登录解析）
+--   * 注册已下线（账号由管理员在控制台手动创建），删除注册专用 RPC
+--     username_exists；set_username / auth_username 仅 authenticated 可执行
+--   * 对齐 0013：登录支持「用户名或邮箱」——resolve_login_identifier
+--     （用户名→邮箱解析，security definer，anon 可调用）保留并授权
 -- ⚠️ 部署后需在 Dashboard → Authentication → Providers → Email 关闭
 --    「Enable Email Signup」，否则 API 层仍可直接调 /auth/v1/signup 注册。
 -- ============================================================================
@@ -211,12 +212,31 @@ begin
 end;
 $$;
 
--- 注册已下线（账号由管理员手动创建，登录为邮箱直登）：
--- 删除注册专用 RPC —— username_exists（注册预检）与
--- resolve_login_identifier（用户名→邮箱解析，曾允许匿名调用者换取任意用户邮箱）。
--- drop 语句使「在存量库上重放本基线」也能一并清除这两个已废弃函数。
-drop function if exists public.resolve_login_identifier(text);
+-- 注册已下线（账号由管理员手动创建）：删除注册专用 RPC username_exists（注册预检）。
 drop function if exists public.username_exists(text);
+
+-- 「用户名或邮箱」登录：Supabase Auth 只认邮箱，客户端在输入不含 @ 时
+-- 调用本 RPC 把用户名解析为注册邮箱后再 signInWithPassword。
+-- 注意：anon 可调用（登录发生在认证之前），存在按用户名探测邮箱的枚举面 ——
+-- 当前仅少量管理员手动建号，属可接受权衡；客户端错误提示统一为「用户名或密码错误」。
+create or replace function public.resolve_login_identifier(identifier text)
+returns text
+language sql
+security definer
+set search_path = public
+as $$
+  select case
+    when identifier ~ '@' then identifier
+    else (
+      select email from public.profiles
+      where username = resolve_login_identifier.identifier
+        and email <> ''
+      limit 1
+    )
+  end;
+$$;
+
+grant execute on function public.resolve_login_identifier(text) to anon, authenticated;
 
 -- ----------------------------------------------------------------------------
 -- 4. 触发器

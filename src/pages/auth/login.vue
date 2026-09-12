@@ -4,11 +4,11 @@ import { useRoute, useRouter, usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useSettingsStore } from '../../stores/settings'
-import { validateEmail, validateUsername, validatePassword, readableError } from '../../services/auth'
+import { validateIdentifier, validateUsername, validatePassword, readableError } from '../../services/auth'
 import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner, setOwnershipPending, clearOwnershipPending, getOwnershipPending } from '../../services/localData'
 import { pauseAutoSync, resumeAutoSync, syncAfterLogin } from '../../services/autoSync'
 import LocalDataModal from '../../components/Common/LocalDataModal.vue'
-import { User, Mail, Lock, LoaderCircle } from 'lucide-vue-next'
+import { User, Lock, LoaderCircle } from 'lucide-vue-next'
 
 const auth = useAuthStore()
 const settingsStore = useSettingsStore()
@@ -16,7 +16,7 @@ usePageRoute()
 const router = useRouter()
 const route = useRoute()
 
-const email = ref('')
+const identifier = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
@@ -49,7 +49,7 @@ async function onSubmit() {
   // 并发守卫：uni-h5 在输入框回车时会触发 confirm，按钮的 disabled 挡不住键盘路径，
   // 重复提交会造成并发登录请求与 pause/resume 自动同步错乱
   if (loading.value) return
-  error.value = validateEmail(email.value) || validatePassword(password.value)
+  error.value = validateIdentifier(identifier.value) || validatePassword(password.value)
   if (error.value) return
 
   // 登录请求期间就暂停后台自动同步：登录成功到归属检测完成之间存在窗口，
@@ -58,7 +58,7 @@ async function onSubmit() {
   loading.value = true
   setProgress('正在登录…', 8)
   try {
-    await auth.login({ email: email.value.trim(), password: password.value })
+    await auth.login({ identifier: identifier.value.trim(), password: password.value })
     // 手动创建的账号尚未绑定用户名：先完成一次性绑定，再进入登录收尾
     if (!auth.username) {
       needUsername.value = true
@@ -256,19 +256,19 @@ onUnmounted(() => {
 
         <div v-else class="space-y-5">
           <div>
-            <label for="email" class="block text-sm font-medium text-gray-700 dark:text-neutral-300">邮箱</label>
+            <label for="identifier" class="block text-sm font-medium text-gray-700 dark:text-neutral-300">用户名或邮箱</label>
             <div class="relative mt-1">
               <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                <Mail class="w-5 h-5" />
+                <User class="w-5 h-5" />
               </span>
               <input
-                id="email"
-                v-model="email"
-                type="email"
-                autocomplete="email"
-                aria-label="邮箱"
+                id="identifier"
+                v-model="identifier"
+                type="text"
+                autocomplete="username"
+                aria-label="用户名或邮箱"
                 @confirm="onSubmit"
-                placeholder="name@example.com"
+                placeholder="输入用户名或邮箱"
                 class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-gray-300 dark:border-neutral-700 bg-gray-50 dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>

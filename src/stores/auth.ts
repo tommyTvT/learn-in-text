@@ -317,8 +317,8 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 登录（邮箱直登）；云端设置同步由视图在归属决策后调用 syncSettingsAfterLogin */
-  async function login(payload: { email: string; password: string }) {
+  /** 登录（用户名或邮箱）；云端设置同步由视图在归属决策后调用 syncSettingsAfterLogin */
+  async function login(payload: { identifier: string; password: string }) {
     const { session: newSession, user: newUser } = await authService.login(payload)
     await syncFromSession(newSession)
     return { session: newSession, user: newUser }
