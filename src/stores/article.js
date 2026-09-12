@@ -46,15 +46,31 @@ export const useArticleStore = defineStore('article', () => {
   }
 
   /**
-   * 拖拽排序：把文章从 fromIndex 移动到 toIndex，并持久化整体顺序。
+   * 仅调整内存中的顺序（不写库）。
+   * 移动端触摸拖拽过程中会连续调用它做实时换位，松手时再统一落库，
+   * 避免拖拽过程中产生大量 IndexedDB 写入。
    */
-  async function moveArticle(fromIndex, toIndex) {
+  function applyArticleOrder(fromIndex, toIndex) {
+    if (fromIndex === toIndex) return
     const list = articles.value.slice()
     const [moved] = list.splice(fromIndex, 1)
+    if (!moved) return
     list.splice(toIndex, 0, moved)
     list.forEach((a, i) => { a.sortOrder = i })
     articles.value = list
-    await articleService.updateSortOrders(list.map(a => a.id))
+  }
+
+  /** 把当前内存顺序整体写入本地库（并刷新 updatedAt 以触发云端同步） */
+  async function persistArticleOrder() {
+    await articleService.updateSortOrders(articles.value.map(a => a.id))
+  }
+
+  /**
+   * 拖拽排序：把文章从 fromIndex 移动到 toIndex，并持久化整体顺序。
+   */
+  async function moveArticle(fromIndex, toIndex) {
+    applyArticleOrder(fromIndex, toIndex)
+    await persistArticleOrder()
   }
 
   async function deleteArticle(id) {
@@ -78,6 +94,8 @@ export const useArticleStore = defineStore('article', () => {
     createArticle,
     updateArticle,
     moveArticle,
+    applyArticleOrder,
+    persistArticleOrder,
     deleteArticle
   }
 })

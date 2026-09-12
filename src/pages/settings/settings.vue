@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { ref, computed, onMounted } from 'vue'
 import ULink from '../../components/Common/ULink.vue'
 import { usePageRoute } from '../../composables/routerShim'
@@ -8,8 +8,8 @@ import { useAuthStore } from '../../stores/auth'
 import { useWordStore } from '../../stores/word'
 import { exportService } from '../../services/db'
 import { testConnection as testCloudConnection, syncNow, clearCloud } from '../../services/sync'
-import { lastSyncState, setLastSyncState, resetLastSyncState } from '../../services/autoSync'
-import { clearLocalData, downloadFullBackup } from '../../services/localData'
+import { lastSyncState, setLastSyncState, resetLastSyncState, pauseAutoSync, resumeAutoSync } from '../../services/autoSync'
+import { clearLocalData, downloadFullBackup, clearOwnershipPending } from '../../services/localData'
 import AIConfigModal from '../../components/AI/AIConfigModal.vue'
 import ModelConfigModal from '../../components/AI/ModelConfigModal.vue'
 import CacheClearModal from '../../components/Common/CacheClearModal.vue'
@@ -121,6 +121,10 @@ async function handleClearCloud() {
 async function handleLogout() {
   if (!await confirmDialog('退出登录前会先把本地数据同步到云端，然后清除本设备上的本地数据（重新登录后可从云端恢复）。确定退出登录吗？')) return
 
+  // 登出全程暂停后台自动同步：步骤 1 的同步完成后、本地数据清除前存在窗口，
+  // 定时器/切前台/网络恢复若在此触发同步，会读到清除前的数据并把快照写回，
+  // 导致下次登录把本地数据误判为「已删除」而清空云端
+  pauseAutoSync()
   loggingOut.value = true
   try {
     // 1. 先同步，确保云端保留最新数据（与自动同步共用并发锁，进行中会复用同一 Promise）
@@ -139,6 +143,8 @@ async function handleLogout() {
       await alert('清除本地数据失败：' + error.message + '，已取消退出登录')
       return
     }
+    // 一并清除可能残留的归属决策待定标记（clearLocalData 已清数据，标记无意义）
+    clearOwnershipPending()
     resetLastSyncState()
     wordStore.fetchMarkedWords(true)
     loadStats()
@@ -147,6 +153,8 @@ async function handleLogout() {
     await authStore.logout()
   } finally {
     loggingOut.value = false
+    // 登出成功后 isConfigured 兜底拦截；中途取消/失败时恢复后台自动同步
+    resumeAutoSync()
   }
 }
 
@@ -359,6 +367,64 @@ onMounted(() => {
                   :class="[
                     'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
                     settingsStore.enableSelectionTranslation ? 'translate-x-5' : ''
+                  ]"
+                />
+              </button>
+            </div>
+          </div>
+
+          <!-- 词义生成：合批请求 -->
+          <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">合批请求</h3>
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  开启后，批量生成单词释义时会把多个单词合并到一次 AI 请求中（按所在句子打包），减少请求次数与 token 消耗；关闭后逐个单词请求。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="settingsStore.enableBatchWordRequest"
+                @click="settingsStore.enableBatchWordRequest = !settingsStore.enableBatchWordRequest"
+                :class="[
+                  'relative w-11 h-6 rounded-full transition-colors shrink-0',
+                  settingsStore.enableBatchWordRequest ? 'bg-blue-600' : 'bg-gray-300 dark:bg-neutral-700'
+                ]"
+              >
+                <span
+                  :class="[
+                    'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                    settingsStore.enableBatchWordRequest ? 'translate-x-5' : ''
+                  ]"
+                />
+              </button>
+            </div>
+          </div>
+
+          <!-- 词义生成：按需生成 -->
+          <div class="border-t border-gray-200 dark:border-neutral-800 pt-4">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">按需生成词义</h3>
+                <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
+                  开启后，进入文章不再自动生成全部生词释义，仅在点击单词时生成该词，可大幅减少页面加载时的 AI 请求；关闭后进入文章自动生成全文生词释义。
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="settingsStore.enableOnDemandWordGeneration"
+                @click="settingsStore.enableOnDemandWordGeneration = !settingsStore.enableOnDemandWordGeneration"
+                :class="[
+                  'relative w-11 h-6 rounded-full transition-colors shrink-0',
+                  settingsStore.enableOnDemandWordGeneration ? 'bg-blue-600' : 'bg-gray-300 dark:bg-neutral-700'
+                ]"
+              >
+                <span
+                  :class="[
+                    'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform',
+                    settingsStore.enableOnDemandWordGeneration ? 'translate-x-5' : ''
                   ]"
                 />
               </button>
@@ -596,7 +662,7 @@ onMounted(() => {
                 </p>
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">上下文翻译 max_tokens</label>
+                <label class="block text-sm font-medium text-gray-700 dark:text-neutral-300 mb-1">「在文中」释义 max_tokens</label>
                 <input
                   v-model.number="settingsStore.contextMaxTokens"
                   type="number"
@@ -604,7 +670,7 @@ onMounted(() => {
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                  上下文翻译请求允许生成的最大 token 数
+                  单词在文中的含义与作用说明请求允许生成的最大 token 数
                 </p>
               </div>
               <div>
@@ -654,7 +720,7 @@ onMounted(() => {
               <div>
                 <h3 class="text-sm font-medium text-gray-700 dark:text-neutral-300">调试模式</h3>
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
-                  开启后，每次同步（手动或自动）都会在浏览器控制台（F12 → Console）输出同步时间、触发来源、耗时、各表推送/新增/更新/删除数量以及云端/本地记录数，便于排查同步问题。
+                  开启后，在浏览器控制台（F12 → Console）输出调试信息：同步仅在发生数据变更或失败时打印详情，无变更时只留一行摘要；调用 AI 时打印每次请求的 token 用量与费用（输入 / 输出 / 合计、缓存命中，按空闲 / 高峰单价估算），批量生成单词等并发请求则在全部完成后汇总打印一次。
                 </p>
               </div>
               <button

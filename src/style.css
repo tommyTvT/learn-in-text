@@ -48,21 +48,51 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  color-scheme: light dark;
+  /* 只声明 light：让 UA 默认配色（CanvasText 默认文字色、滚动条、表单
+     控件等）跟随应用内主题（.dark 类）而不是系统偏好。
+     若声明为 `light dark`：系统深色 + 应用浅色时，UA 把默认文字色解析为
+     白色，而页面背景是浅色，所有「没有显式 text-* 类、依赖 color 继承」
+     的文字（如词库页三个禁用按钮的 color:inherit）会变成浅底白字，
+     直接隐形；反向「系统浅色 + 应用深色」同理可让文字变黑不可见。
+     系统偏好对 `@media (prefers-color-scheme)` 的匹配不受此声明影响。 */
+  color-scheme: light;
+  /* 显式给出默认文字色兜底，不依赖 UA 的 CanvasText 行为 */
+  color: #1f2937; /* gray-800 */
+}
+
+/* 应用内深色主题：同步切换 UA 配色与默认文字色（.dark 加在 <html> 上） */
+:root.dark {
+  color-scheme: dark;
+  color: #e5e5e5; /* neutral-200 */
 }
 
 /* ============================================================
-   页面尺寸自适应：小屏（手机）下等比下调根字号，
-   保证 175% 放大基准的文字在窄屏上不溢出、每行字符数合理。
+   手机端文字刻度：桌面端的 175% 放大刻度在窄屏上会让界面显得
+   非常臃肿（正文 ≈25px、标题 ≈29px），这里在小屏直接回到标准
+   移动端字号（≈100%）。
+   ⚠️ 只覆盖 --text-* 字号线，不缩放根字号：
+   - 同样能收紧所有 text-* 工具类；
+   - 但 padding / margin / 按钮高度 / 图标尺寸仍按原 rem 设计渲染，
+     避免把可点击区域与图标一起缩到不可用（拖拽手柄、底部 TabBar 等）。
+   字号后续如需微调，只改本块即可，其余页面无需改动。
    ============================================================ */
 @media (max-width: 640px) {
   :root {
-    font-size: 90%;
-  }
-}
-@media (max-width: 380px) {
-  :root {
-    font-size: 84%;
+    /*            字号          行高 */
+    --text-xs:   0.75rem;   /* 12px */
+    --text-xs--line-height: 1rem;
+    --text-sm:   0.875rem;  /* 14px */
+    --text-sm--line-height: 1.25rem;
+    --text-base: 1rem;      /* 16px（正文基准） */
+    --text-base--line-height: 1.5rem;
+    --text-lg:   1.125rem;  /* 18px */
+    --text-lg--line-height: 1.75rem;
+    --text-xl:   1.25rem;   /* 20px */
+    --text-xl--line-height: 1.75rem;
+    --text-2xl:  1.5rem;    /* 24px */
+    --text-2xl--line-height: 2rem;
+    --text-3xl:  1.875rem;  /* 30px */
+    --text-3xl--line-height: 2.25rem;
   }
 }
 
@@ -132,9 +162,15 @@ body {
    line-height:2.55555556、overflow:hidden、默认边框/背景/字号等，
    与 Tailwind utility 类冲突，表现为按钮文字被裁切、输入框变形。
    这里把这些组件"还原"成无样式容器，交由 Tailwind 类接管。
-   选择器用 `uni-app uni-xxx`（specificity 0,0,2），且本文件在
-   框架样式之后加载，可稳定覆盖组件默认样式；而源码上的
-   Tailwind 类（0,1,0）优先级更高，仍能覆盖此处，互不打架。
+   选择器用 `body uni-xxx`（specificity 0,0,2），且本文件在框架样式
+   之后加载，可稳定覆盖组件默认样式；而源码上的 Tailwind 类
+   （0,1,0）优先级更高，仍能覆盖此处，互不打架。
+   ⚠️ 前缀不能用 `uni-app`：Teleport 到 body 的弹窗（AI 配置、缓存
+   清理等）渲染在 <uni-app> 元素之外，带 uni-app 前缀的选择器全部
+   不匹配，库默认样式（如 uni-input 的 height:1.4em、font-size:16px）
+   会直接生效，表现为弹窗内输入框高度坍塌成十几像素。改成 body
+   前缀可同时命中页面内与 Teleport 弹窗两种位置，specificity 与
+   uni-app 前缀相同，与 Tailwind 类的优先级关系保持不变。
    ============================================================ */
 
 /* 恢复文本选择：uni base.css 的 html,body{user-select:none} 会破坏划词翻译。
@@ -163,7 +199,7 @@ html:root uni-page-body {
 /* display/text-align 对齐浏览器 UA 对原生 <button> 的默认值（inline-block + 居中），
    而非 inline-flex——避免把子节点变成 flex item 改变原版 Vue 里的 inline 流排布。
    源码中带 flex 类的按钮由 Tailwind 类（specificity 0,1,0 > 0,0,2）自行覆盖。 */
-uni-app uni-button {
+body uni-button {
   display: inline-block;
   margin: 0;
   padding: 0;
@@ -191,29 +227,37 @@ uni-app uni-button {
      dark:bg-* (0,1,0)，深色模式下 disabled 按钮一片惨白（词库页三个操作钮）
    - .button-hover 是 uni 运行时 JS 在按压/悬停时动态添加的类（#dedede 浅灰底），
      同样不跟随主题，表现为"点击激活处白色"
-   - :after 伪元素给每个按钮画一圈 rgba(0,0,0,.2) 黑边（小程序风格） */
-uni-app uni-button[type='default'],
-uni-app uni-button[disabled],
-uni-app uni-button[disabled][type='default'],
-uni-app uni-button[disabled]:not([type]) {
+   - :after 伪元素给每个按钮画一圈 rgba(0,0,0,.2) 黑边（小程序风格）
+   ⚠️ 本规则的 `color: inherit` / `background-color: transparent` 是 (0,1,2)，
+   会压过禁用按钮自身的 Tailwind 颜色类（0,1,0）。因此有两个必须保持的约定：
+   1) 禁用按钮的文字色实际由根元素默认色决定 —— 必须保持上方 :root /
+      :root.dark 的 color 跟随应用主题；否则「系统主题与应用主题相反」时
+      （如系统深色 + 应用浅色）会继承到与背景同色的文字，按钮直接隐形；
+   2) 需要保留语义色的禁用按钮（词库页的删除/AI 生成/导出），把 Tailwind
+      颜色类写成 important 后缀形式（bg-red-100! dark:bg-neutral-800! 等），
+      用 !important 压回本规则，disabled 时仍显示主题色。 */
+body uni-button[type='default'],
+body uni-button[disabled],
+body uni-button[disabled][type='default'],
+body uni-button[disabled]:not([type]) {
   background-color: transparent;
   color: inherit;
 }
 
-uni-app uni-button:after {
+body uni-button:after {
   content: none;
 }
 
-uni-app uni-button.button-hover,
-uni-app uni-button.button-hover[type='default'] {
+body uni-button.button-hover,
+body uni-button.button-hover[type='default'] {
   background-color: transparent;
   color: inherit;
 }
 
 /* 宿主层：还原成无装饰的块容器，尺寸/内边距交给源码上的 Tailwind 类。
-   用 `uni-app uni-input`（0,0,2）压过库的 `uni-input`（0,0,1）元素选择器。 */
-uni-app uni-input,
-uni-app uni-textarea {
+   用 `body uni-input`（0,0,2）压过库的 `uni-input`（0,0,1）元素选择器。 */
+body uni-input,
+body uni-textarea {
   display: block;
   position: relative;
   width: 100%;
@@ -233,14 +277,22 @@ uni-app uni-textarea {
 
 /* 内部实现层：库把真实的 <input>/<textarea> 设为 absolute + height:100%，
    高度完全依赖宿主显式值、忽略 rows，宿主改 auto 后就坍塌成 0px。
-   这里把它们还原成 static + height:auto，让原生 intrinsic 高度
+   这里把它们还原成 relative + height:auto，让原生 intrinsic 高度
    （textarea 的 rows、input 的单行）生效。
    ⚠️ 关键属性全部 !important：uni 还会运行时注入 uvue.css
-   （`uni-app uni-input>.uni-input-wrapper { flex:1 }` 等，(0,1,2) 同权重但后注入），
-   不加 !important 会被它反杀，display 变 flex 后高度链再次失稳。 */
-uni-app uni-input .uni-input-wrapper,
-uni-app uni-textarea .uni-textarea-wrapper {
-  position: static !important;
+   （`body uni-input>.uni-input-wrapper { flex:1 }` 等，(0,1,2) 同权重但后注入），
+   不加 !important 会被它反杀，display 变 flex 后高度链再次失稳。
+   ⚠️ wrapper 与输入层必须保持 relative（不能是 static），两个原因：
+   1) 占位层（placeholder）是 absolute，包含块需要是 wrapper（与输入层等宽
+      同位）；wrapper 一旦变 static，包含块会落到宿主上，其 left:0/top:0
+      从宿主 padding 内侧起算，占位文字比真实输入位置偏左一个左内边距、
+      偏上一个上内边距，看起来"贴边"且与光标错位；
+   2) 输入层若是 static 就不是定位元素，层叠上会被 absolute 的占位层盖住
+      绘制，光标和已输入文字会被占位文字遮挡。
+   relative 不脱离文档流，高度链（intrinsic 高度）不受影响。 */
+body uni-input .uni-input-wrapper,
+body uni-textarea .uni-textarea-wrapper {
+  position: relative !important;
   display: block !important;
   width: 100% !important;
   height: auto !important;
@@ -250,8 +302,8 @@ uni-app uni-textarea .uni-textarea-wrapper {
   overflow: visible !important;
 }
 
-uni-app uni-input .uni-input-input {
-  position: static !important;
+body uni-input .uni-input-input {
+  position: relative !important;
   display: block !important;
   width: 100% !important;
   height: auto !important;
@@ -269,8 +321,8 @@ uni-app uni-input .uni-input-input {
   appearance: none;
 }
 
-uni-app uni-textarea .uni-textarea-textarea {
-  position: static !important;
+body uni-textarea .uni-textarea-textarea {
+  position: relative !important;
   display: block !important;
   width: 100% !important;
   height: auto !important;
@@ -289,9 +341,27 @@ uni-app uni-textarea .uni-textarea-textarea {
   appearance: none;
 }
 
+/* uni 的 textarea 组件不把 rows 传给内部真实 textarea（内部 rows 恒为
+   浏览器默认的 2 行），导致 rows="3"/"6"/"12" 的多行输入框全部塌成
+   2 行高、长内容难以粘贴查看。这里按宿主的 rows 属性补回行数高度：
+   1lh = 当前行高，随字号与 leading-relaxed 等行高设置自适应，不写死像素。
+   ⚠️ 新增其它 rows 值（如 rows="8"）时需在此追加对应规则。 */
+body uni-textarea[rows="1"] .uni-textarea-textarea { height: calc(1 * 1lh) !important; }
+body uni-textarea[rows="2"] .uni-textarea-textarea { height: calc(2 * 1lh) !important; }
+body uni-textarea[rows="3"] .uni-textarea-textarea { height: calc(3 * 1lh) !important; }
+body uni-textarea[rows="6"] .uni-textarea-textarea { height: calc(6 * 1lh) !important; }
+body uni-textarea[rows="12"] .uni-textarea-textarea { height: calc(12 * 1lh) !important; }
+
 /* 占位层对齐：placeholder 保持库的 absolute + top:auto（静态位置对齐输入文字），
    但锁死行高继承，避免宿主行高变化时占位文字错位 */
-uni-app uni-input .uni-input-placeholder,
-uni-app uni-textarea .uni-textarea-placeholder {
+body uni-input .uni-input-placeholder,
+body uni-textarea .uni-textarea-placeholder {
   line-height: inherit !important;
+}
+
+/* uni 库的 textarea 占位层漏写了 pointer-events:none（input 的占位层有），
+   空值时整层（absolute 铺满）覆盖在 textarea 上并拦截点击，表现为
+   "点了没反应、根本没法输入"。这里补齐，与 input 的占位层行为一致。 */
+body uni-textarea .uni-textarea-placeholder {
+  pointer-events: none;
 }

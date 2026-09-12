@@ -23,7 +23,7 @@ export const PRESET_PROVIDERS = {
 const THEMES = ['system', 'light', 'dark']
 const DEFAULT_MAX_CONCURRENCY = 50
 const DEFAULT_BASIC_INFO_MAX_TOKENS = 300
-const DEFAULT_CONTEXT_MAX_TOKENS = 200
+const DEFAULT_CONTEXT_MAX_TOKENS = 300
 const DEFAULT_ARTICLE_MAX_TOKENS = 2000
 const DEFAULT_REQUEST_TIMEOUT = 30
 const DEFAULT_AUTO_SYNC = true
@@ -33,6 +33,10 @@ const DEFAULT_ENABLE_SELECTION_TRANSLATION = true
 const DEFAULT_AUTO_PRONOUNCE = true
 const DEFAULT_SELECTION_MAX_TOKENS = 500
 const DEFAULT_SELECTION_CHAT_MAX_TOKENS = 1000
+// 词义生成：合批请求（把多个单词打包进一次 AI 请求，按所在句子分组）
+const DEFAULT_ENABLE_BATCH_WORD_REQUEST = true
+// 词义生成：按需生成（进入文章不自动生成词义，仅点击单词时生成）
+const DEFAULT_ENABLE_ON_DEMAND_WORD_GENERATION = false
 
 function toPositiveNumber(value, fallback) {
   const num = Number(value)
@@ -126,6 +130,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const selectionMaxTokens = ref(DEFAULT_SELECTION_MAX_TOKENS)
   const selectionChatMaxTokens = ref(DEFAULT_SELECTION_CHAT_MAX_TOKENS)
   const autoPronounce = ref(DEFAULT_AUTO_PRONOUNCE)
+  // 词义生成：合批请求 / 按需生成（详见设置页「词义生成」区块）
+  const enableBatchWordRequest = ref(DEFAULT_ENABLE_BATCH_WORD_REQUEST)
+  const enableOnDemandWordGeneration = ref(DEFAULT_ENABLE_ON_DEMAND_WORD_GENERATION)
 
   // ---- 设置同步（LWW）状态 ----
   // 本地最后修改时间戳；应用云端设置时不计入「本地修改」，避免触发回传循环
@@ -272,6 +279,8 @@ export const useSettingsStore = defineStore('settings', () => {
       selectionMaxTokens.value = toPositiveNumber(data.selectionMaxTokens, DEFAULT_SELECTION_MAX_TOKENS)
       selectionChatMaxTokens.value = toPositiveNumber(data.selectionChatMaxTokens, DEFAULT_SELECTION_CHAT_MAX_TOKENS)
       autoPronounce.value = data.autoPronounce !== undefined ? !!data.autoPronounce : DEFAULT_AUTO_PRONOUNCE
+      enableBatchWordRequest.value = data.enableBatchWordRequest !== undefined ? !!data.enableBatchWordRequest : DEFAULT_ENABLE_BATCH_WORD_REQUEST
+      enableOnDemandWordGeneration.value = data.enableOnDemandWordGeneration !== undefined ? !!data.enableOnDemandWordGeneration : DEFAULT_ENABLE_ON_DEMAND_WORD_GENERATION
     } catch (e) {
       console.error('加载设置失败:', e)
       if (!providers.value.length) {
@@ -306,7 +315,9 @@ export const useSettingsStore = defineStore('settings', () => {
         enableSelectionTranslation: enableSelectionTranslation.value,
         selectionMaxTokens: selectionMaxTokens.value,
         selectionChatMaxTokens: selectionChatMaxTokens.value,
-        autoPronounce: autoPronounce.value
+        autoPronounce: autoPronounce.value,
+        enableBatchWordRequest: enableBatchWordRequest.value,
+        enableOnDemandWordGeneration: enableOnDemandWordGeneration.value
       }))
     } catch (e) {
       console.error('保存设置失败:', e)
@@ -336,7 +347,9 @@ export const useSettingsStore = defineStore('settings', () => {
       enableSelectionTranslation: enableSelectionTranslation.value,
       selectionMaxTokens: selectionMaxTokens.value,
       selectionChatMaxTokens: selectionChatMaxTokens.value,
-      autoPronounce: autoPronounce.value
+      autoPronounce: autoPronounce.value,
+      enableBatchWordRequest: enableBatchWordRequest.value,
+      enableOnDemandWordGeneration: enableOnDemandWordGeneration.value
     }
   }
 
@@ -362,6 +375,8 @@ export const useSettingsStore = defineStore('settings', () => {
     if (data.selectionMaxTokens !== undefined) selectionMaxTokens.value = toPositiveNumber(data.selectionMaxTokens, DEFAULT_SELECTION_MAX_TOKENS)
     if (data.selectionChatMaxTokens !== undefined) selectionChatMaxTokens.value = toPositiveNumber(data.selectionChatMaxTokens, DEFAULT_SELECTION_CHAT_MAX_TOKENS)
     if (data.autoPronounce !== undefined) autoPronounce.value = !!data.autoPronounce
+    if (data.enableBatchWordRequest !== undefined) enableBatchWordRequest.value = !!data.enableBatchWordRequest
+    if (data.enableOnDemandWordGeneration !== undefined) enableOnDemandWordGeneration.value = !!data.enableOnDemandWordGeneration
     applyTheme()
     saveSettings()
     // 从备份导入设置视为本地修改，触发云端回传；应用云端设置时跳过
@@ -386,7 +401,10 @@ export const useSettingsStore = defineStore('settings', () => {
     try {
       importSettings(rest)
     } finally {
-      silentApply = false
+      // 与 resetSettings 同理：watch 回调为异步 flush，silentApply 必须维持到
+      // 回调执行完再复位。否则刚应用的云端设置会被 watcher 当作本地修改，
+      // 触发回声推送并以新的 updatedAt 覆盖其他设备尚未上传的真实修改。
+      nextTick(() => { silentApply = false })
     }
   }
 
@@ -417,14 +435,31 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  // 拉取/推送后的回声防护窗口（毫秒）：窗口内的上传推迟执行
+  const PUSH_ECHO_GUARD_MS = 3000
+  // 上传防抖定时器
+  let uploadTimer = null
+
   /** 本地设置变更后上传到云端 */
   async function pushToCloud() {
     const auth = useAuthStore()
     const username = auth.username?.trim()
-    if (!username || cloudSyncing.value) return
+    // isLoggedIn 必查：本地身份快照会在未登录时也提供 username，
+    // 只判断 username 会在会话失效后仍尝试推送（必然 401/RLS 失败）
+    if (!username || !auth.isLoggedIn || cloudSyncing.value) return
 
     const now = Date.now()
-    if (now - syncedAt.value < 3000) return // 与拉取刚同步后避免立即回传
+    const waitMs = syncedAt.value + PUSH_ECHO_GUARD_MS - now
+    if (waitMs > 0) {
+      // 刚完成拉取/推送：推迟到防护窗口结束后再上传，
+      // 而不是直接丢弃——丢弃会静默吞掉窗口内的真实修改
+      if (uploadTimer) clearTimeout(uploadTimer)
+      uploadTimer = setTimeout(() => {
+        uploadTimer = null
+        pushToCloud()
+      }, waitMs)
+      return
+    }
 
     cloudSyncing.value = true
     try {
@@ -437,7 +472,6 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   // 上传防抖
-  let uploadTimer = null
   function scheduleUpload() {
     if (uploadTimer) clearTimeout(uploadTimer)
     uploadTimer = setTimeout(() => {
@@ -471,6 +505,8 @@ export const useSettingsStore = defineStore('settings', () => {
       selectionMaxTokens.value = DEFAULT_SELECTION_MAX_TOKENS
       selectionChatMaxTokens.value = DEFAULT_SELECTION_CHAT_MAX_TOKENS
       autoPronounce.value = DEFAULT_AUTO_PRONOUNCE
+      enableBatchWordRequest.value = DEFAULT_ENABLE_BATCH_WORD_REQUEST
+      enableOnDemandWordGeneration.value = DEFAULT_ENABLE_ON_DEMAND_WORD_GENERATION
       // 同步时间一并清零：重置后的本地设置不再参与 LWW 比较，
       // 下次登录时以云端（或默认值首推）为准
       syncedAt.value = 0
@@ -490,9 +526,20 @@ export const useSettingsStore = defineStore('settings', () => {
   loadSettings()
   loadSyncTimes()
 
-  watch([providers, textModelConfig, visionModelConfig, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, supabaseUrl, supabaseAnonKey, autoSync, debugMode, enableSelectionTranslation, selectionMaxTokens, selectionChatMaxTokens, autoPronounce], () => {
+  // 全部设置字段变更 → 保存到本地；其中参与云端同步的字段变更 → 防抖上传。
+  // supabaseUrl / supabaseAnonKey 是本机环境配置（导出 payload 时排除），
+  // 其变更只存本地，不应触发一次注定无效的云端上传。
+  const envOnlyFields = [supabaseUrl, supabaseAnonKey]
+  const syncedFields = [providers, textModelConfig, visionModelConfig, theme, maxConcurrency, basicInfoMaxTokens, contextMaxTokens, articleMaxTokens, requestTimeout, autoSync, debugMode, enableSelectionTranslation, selectionMaxTokens, selectionChatMaxTokens, autoPronounce, enableBatchWordRequest, enableOnDemandWordGeneration]
+  const allFields = [...syncedFields, ...envOnlyFields]
+
+  watch(allFields, () => {
     if (silentApply) return
     saveSettings()
+  }, { deep: true })
+
+  watch(syncedFields, () => {
+    if (silentApply) return
     scheduleUpload()
   }, { deep: true })
 
@@ -516,6 +563,8 @@ export const useSettingsStore = defineStore('settings', () => {
     selectionMaxTokens,
     selectionChatMaxTokens,
     autoPronounce,
+    enableBatchWordRequest,
+    enableOnDemandWordGeneration,
     isDark,
     addCustomProvider,
     removeProvider,

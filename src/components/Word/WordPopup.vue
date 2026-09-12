@@ -27,7 +27,7 @@ const isMobile = ref(false)
 let mq = null
 let lastTouchCloseTime = 0
 
-// “在文中”上下文翻译默认折叠（后台依旧自动加载），点击标题展开/收起
+// “在文中”上下文释义默认折叠（后台依旧自动加载），点击标题展开/收起
 const contextExpanded = ref(false)
 
 // 移动端底部弹出/收起动画状态
@@ -348,7 +348,7 @@ function handleResize() {
               </template>
             </div>
             <div v-else-if="contextError" class="flex items-center gap-2 py-1">
-              <span class="text-xs text-red-500 dark:text-red-400">翻译失败</span>
+              <span class="text-xs text-red-500 dark:text-red-400">解释失败</span>
               <button
                 @click="$emit('retry-context')"
                 class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"

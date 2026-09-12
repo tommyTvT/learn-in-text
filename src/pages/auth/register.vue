@@ -1,12 +1,12 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter, usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
 import ULink from '../../components/Common/ULink.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useSettingsStore } from '../../stores/settings'
 import { validateUsername, validateEmail, validatePassword, readableError } from '../../services/auth'
-import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner } from '../../services/localData'
+import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner, setOwnershipPending, clearOwnershipPending, getOwnershipPending } from '../../services/localData'
 import { pauseAutoSync, resumeAutoSync, syncAfterLogin } from '../../services/autoSync'
 import LocalDataModal from '../../components/Common/LocalDataModal.vue'
 import { User, Lock, Mail, LoaderCircle } from 'lucide-vue-next'
@@ -43,6 +43,9 @@ async function onSubmit() {
     return
   }
 
+  // 注册请求期间就暂停后台自动同步：成功到归属检测完成之间存在窗口，
+  // boot 定时器/切前台若恰好触发会把残留数据推给新账号
+  pauseAutoSync()
   loading.value = true
   try {
     await auth.register({
@@ -54,22 +57,16 @@ async function onSubmit() {
     const stats = await getLocalDataStats()
     const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
     if (hasData && getLocalDataOwner() !== auth.username) {
-      // 决策前暂停后台自动同步，防止切前台/网络恢复触发的同步抢先把残留数据推给新账号
-      pauseAutoSync()
+      // 持久化「归属决策待定」标记：弹窗未决时关闭/刷新页面，
+      // 下次启动该标记继续拦截后台自动同步，防止数据误推/误删
+      setOwnershipPending(auth.username)
       localDataStats.value = stats
       showLocalDataModal.value = true
       return
     }
-    // 无学习数据冲突，但设置可能仍是其他账号的残留 → 先重置为默认，再首推默认设置到云端
-    if (getLocalDataOwner() !== auth.username) {
-      await settingsStore.resetSettings()
-    }
-    setLocalDataOwner(auth.username)
-    await auth.syncSettingsAfterLogin()
-    // 注册即登录：立即全量同步（首推本地数据到云端），不等定时任务；失败不阻塞进入应用
-    await syncAfterLogin()
-    router.push(getRedirect())
+    await finishRegisterWithoutConflict()
   } catch (e) {
+    resumeAutoSync()
     if (e && e.message === 'NEED_EMAIL_CONFIRM') {
       needConfirm.value = true
     } else {
@@ -80,21 +77,62 @@ async function onSubmit() {
   }
 }
 
+/** 无数据冲突路径的收尾：重置残留设置 → 绑定归属 → 同步设置与数据 → 进入应用 */
+async function finishRegisterWithoutConflict() {
+  // 无学习数据冲突，但设置可能仍是其他账号的残留 → 先重置为默认，再首推默认设置到云端
+  if (getLocalDataOwner() !== auth.username) {
+    await settingsStore.resetSettings()
+  }
+  setLocalDataOwner(auth.username)
+  clearOwnershipPending()
+  await auth.syncSettingsAfterLogin()
+  // 注册即登录：立即全量同步（首推本地数据到云端），不等定时任务；失败不阻塞进入应用
+  await syncAfterLogin()
+  resumeAutoSync()
+  router.push(getRedirect())
+}
+
+/** 恢复上次未完成的归属决策（弹窗期间关闭/刷新页面后重新进入本页） */
+async function resumeOwnershipDecision() {
+  const stats = await getLocalDataStats()
+  const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
+  if (hasData && getLocalDataOwner() !== auth.username) {
+    pauseAutoSync()
+    localDataStats.value = stats
+    showLocalDataModal.value = true
+    return
+  }
+  await finishRegisterWithoutConflict()
+}
+
 function onLocalDataDone() {
   showLocalDataModal.value = false
+  clearOwnershipPending()
   resumeAutoSync()
   router.push(getRedirect())
 }
 
 function onLocalDataCancel() {
   showLocalDataModal.value = false
+  clearOwnershipPending()
   resumeAutoSync()
 }
 
 onMounted(() => {
   if (auth.isLoggedIn) {
+    // 上次注册的归属决策未完成（弹窗期间离开页面）：继续决策而非直接进入
+    if (getOwnershipPending() === auth.username && auth.username) {
+      resumeOwnershipDecision()
+      return
+    }
     router.replace(getRedirect())
   }
+})
+
+// 兜底：弹窗未决就离开注册页时恢复自动同步（数据安全由
+// runSync 的 pending 标记持续拦截，布局组件会把用户引导回认证页完成决策）
+onUnmounted(() => {
+  resumeAutoSync()
 })
 </script>
 

@@ -1,12 +1,12 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter, usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
 import ULink from '../../components/Common/ULink.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useSettingsStore } from '../../stores/settings'
 import { validateLoginIdentifier, validatePassword, readableError } from '../../services/auth'
-import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner } from '../../services/localData'
+import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner, setOwnershipPending, clearOwnershipPending, getOwnershipPending } from '../../services/localData'
 import { pauseAutoSync, resumeAutoSync, syncAfterLogin } from '../../services/autoSync'
 import LocalDataModal from '../../components/Common/LocalDataModal.vue'
 import { User, Lock, LoaderCircle } from 'lucide-vue-next'
@@ -27,6 +27,10 @@ const localDataStats = ref(null)
 const progressLabel = ref('')
 const progressPercent = ref(0)
 
+// 登录态失效提示：长时间未登录 / 会话被撤销时，说明需要重新登录的原因，
+// 并明确本地学习数据不受影响，避免用户误以为数据丢失
+const sessionNotice = computed(() => (auth.needsLogin ? (auth.sessionError || '登录状态已过期，请重新登录') : ''))
+
 function setProgress(label, percent) {
   progressLabel.value = label
   progressPercent.value = percent
@@ -41,6 +45,9 @@ async function onSubmit() {
   error.value = validateLoginIdentifier(username.value) || validatePassword(password.value)
   if (error.value) return
 
+  // 登录请求期间就暂停后台自动同步：登录成功到归属检测完成之间存在窗口，
+  // boot 定时器/切前台若恰好触发会把残留数据推给新账号
+  pauseAutoSync()
   loading.value = true
   setProgress('正在登录…', 8)
   try {
@@ -49,45 +56,90 @@ async function onSubmit() {
     const stats = await getLocalDataStats()
     const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
     if (hasData && getLocalDataOwner() !== auth.username) {
-      // 决策前暂停后台自动同步，防止切前台/网络恢复触发的同步抢先把残留数据推给新账号
-      pauseAutoSync()
+      // 持久化「归属决策待定」标记：弹窗未决时用户关闭/刷新页面，
+      // 该标记会在下次启动继续拦截后台自动同步，防止数据误推/误删
+      setOwnershipPending(auth.username)
       localDataStats.value = stats
       showLocalDataModal.value = true
       return
     }
-    // 无学习数据冲突，但设置可能仍是其他账号的残留（如会话过期后换号）→
-    // 先重置为默认，再拉取当前账号的云端设置，避免旧设置串库/回传
-    if (getLocalDataOwner() !== auth.username) {
-      await settingsStore.resetSettings()
-    }
-    setLocalDataOwner(auth.username)
-    setProgress('正在同步设置…', 15)
-    await auth.syncSettingsAfterLogin()
-    // 登录后立即全量同步（拉取云端数据到本地），不等定时任务；失败不阻塞进入应用
-    await syncAfterLogin((p) => setProgress(p.label, Math.max(15, p.percent)))
-    router.push(getRedirect())
+    await finishLoginWithoutConflict()
   } catch (e) {
+    resumeAutoSync()
     error.value = readableError(e)
   } finally {
     loading.value = false
   }
 }
 
+/** 无数据冲突路径的收尾：重置残留设置 → 绑定归属 → 同步设置与数据 → 进入应用 */
+async function finishLoginWithoutConflict() {
+  // 无学习数据冲突，但设置可能仍是其他账号的残留（如会话过期后换号）→
+  // 先重置为默认，再拉取当前账号的云端设置，避免旧设置串库/回传
+  if (getLocalDataOwner() !== auth.username) {
+    await settingsStore.resetSettings()
+  }
+  setLocalDataOwner(auth.username)
+  clearOwnershipPending()
+  setProgress('正在同步设置…', 15)
+  await auth.syncSettingsAfterLogin()
+  // 登录后立即全量同步（拉取云端数据到本地），不等定时任务；失败不阻塞进入应用
+  await syncAfterLogin((p) => setProgress(p.label, Math.max(15, p.percent)))
+  resumeAutoSync()
+  router.push(getRedirect())
+}
+
+/** 恢复上次未完成的归属决策（弹窗期间关闭/刷新页面后重新进入本页） */
+async function resumeOwnershipDecision() {
+  const stats = await getLocalDataStats()
+  const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
+  if (hasData && getLocalDataOwner() !== auth.username) {
+    pauseAutoSync()
+    localDataStats.value = stats
+    showLocalDataModal.value = true
+    return
+  }
+  // 数据已不存在或归属已一致（可能已在别处决策）：按无冲突路径收尾
+  await finishLoginWithoutConflict()
+}
+
 function onLocalDataDone() {
   showLocalDataModal.value = false
+  clearOwnershipPending()
   resumeAutoSync()
   router.push(getRedirect())
 }
 
 function onLocalDataCancel() {
   showLocalDataModal.value = false
+  clearOwnershipPending()
   resumeAutoSync()
 }
 
+// 停留在登录页期间会话自动恢复（如网络恢复后 refresh token 刷新成功）：
+// 直接进入应用，避免已经可以免密登录却还要用户手动输入密码
+watch(() => auth.isLoggedIn, (loggedIn) => {
+  if (!loggedIn || loading.value) return
+  // 归属决策未完成时交给 resumeOwnershipDecision 处理，不在这里抢跳转
+  if (getOwnershipPending()) return
+  router.replace(getRedirect())
+})
+
 onMounted(() => {
   if (auth.isLoggedIn) {
+    // 上次登录的归属决策未完成（弹窗期间离开页面）：继续决策而非直接进入
+    if (getOwnershipPending() === auth.username && auth.username) {
+      resumeOwnershipDecision()
+      return
+    }
     router.replace(getRedirect())
   }
+})
+
+// 兜底：弹窗未决就离开登录页时恢复自动同步（数据安全由
+// runSync 的 pending 标记持续拦截，布局组件会把用户引导回本页完成决策）
+onUnmounted(() => {
+  resumeAutoSync()
 })
 </script>
 
@@ -106,6 +158,15 @@ onMounted(() => {
 
       <!-- 表单卡片 -->
       <div class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-gray-200 dark:border-neutral-800 p-5 sm:p-6">
+        <!-- 会话失效提示：说明为什么需要重新登录，并安抚数据安全 -->
+        <div
+          v-if="sessionNotice"
+          class="mb-5 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300"
+        >
+          <span class="mt-0.5 shrink-0">⚠️</span>
+          <span>{{ sessionNotice }}（本地学习数据仍然保留，登录后会自动同步）</span>
+        </div>
+
         <div class="space-y-5">
           <div>
             <label for="username" class="block text-sm font-medium text-gray-700 dark:text-neutral-300">用户名或邮箱</label>

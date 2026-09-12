@@ -5,7 +5,7 @@ import PageLayout from '../../components/Common/PageLayout.vue'
 import { useArticleStore } from '../../stores/article'
 import { useWordStore } from '../../stores/word'
 import { useSettingsStore } from '../../stores/settings'
-import { parseArticle, getWordContext, getWordSentenceWithContext, getSelectionContext, normalizeSelectionText } from '../../services/parser'
+import { parseArticle, getWordContext, getWordSentenceWithContext, groupWordsBySentence, getSelectionContext, normalizeSelectionText } from '../../services/parser'
 import { wordMarkService, contextTranslationService, selectionTranslationService, selectionHash } from '../../services/db'
 import { generateWordBasicInfo, generateWordContextTranslation, batchGenerateWords, generateSelectionTranslation } from '../../services/ai'
 import { speak } from '../../services/tts'
@@ -134,8 +134,11 @@ onMounted(async () => {
     const marks = await wordMarkService.getByArticle(articleId.value)
     localMarks.value = new Set(marks.map(m => m.occKey))
     // 学习模式不默认显示历史标记的红色高亮：点击单词时才标红，再点击取消（仅隐藏视觉，不删数据）
-    // 延迟批量生成词义，等首屏渲染完成后再发起 AI 请求，避免进入页面瞬间卡顿
-    autoGenerateTimer = setTimeout(() => autoGenerateAllWords(), 600)
+    // 延迟批量生成词义，等首屏渲染完成后再发起 AI 请求，避免进入页面瞬间卡顿；
+    // 开启「按需生成词义」后不主动生成，仅在点击单词时生成该词（省去整篇的 AI 请求）
+    if (!settingsStore.enableOnDemandWordGeneration) {
+      autoGenerateTimer = setTimeout(() => autoGenerateAllWords(), 600)
+    }
   } catch (error) {
     console.error('[Reader] 文章数据加载失败:', error)
   }
@@ -529,7 +532,9 @@ async function generateBasicInfo(word, requestId) {
   const rid = requestId ?? wordDetailRequestId
   loadingWord.value = true
   try {
-    const context = getWordContext(article.value.content, word, 50)
+    // 与批量生成保持一致：语境优先取完整句，定位失败回退 50 词窗口
+    const context = getWordSentenceWithContext(article.value.content, word, 0).sentence
+      || getWordContext(article.value.content, word, 50)
     const info = await generateWordBasicInfo(word, context)
     const wordData = await wordStore.getOrCreateWord(word, articleId.value)
     await wordStore.updateWord(wordData.id, {
@@ -564,17 +569,17 @@ async function loadContextTranslation(word, occKey, requestId) {
   contextError.value = false
   loadingContext.value = true
   try {
-    // sentence：目标词所在单句（限定翻译输出范围）；context：前后各多带一句，供 AI 理解语境
+    // sentence：目标词所在单句（限定释义范围）；context：前后各多带一句，供 AI 理解语境
     const { sentence, context } = getWordSentenceWithContext(article.value.content, word, getOccurrence(occKey))
     const result = await generateWordContextTranslation(word, sentence, context)
     if (requestId !== wordDetailRequestId) return
     if (!result.contextTranslation) {
-      throw new Error('翻译结果为空')
+      throw new Error('释义结果为空')
     }
     await wordStore.updateContextTranslation(wordData.id, articleId.value, occKey, result.contextTranslation)
     contextTranslation.value = result.contextTranslation
   } catch (error) {
-    console.error('上下文翻译生成失败:', error.message)
+    console.error('上下文释义生成失败:', error.message)
     if (requestId === wordDetailRequestId) {
       contextError.value = true
     }
@@ -1006,12 +1011,24 @@ async function autoGenerateAllWords() {
     return
   }
 
+  // 语境优先使用目标词所在的完整句（句子信息优先，同时便于合批按句打包），
+  // 句子定位失败的词回退到旧的「50 词窗口」
+  const content = article.value.content
+  const contextByWord = new Map()
+  for (const group of groupWordsBySentence(content, wordsToGenerate.map(w => w.word))) {
+    for (const word of group.words) {
+      contextByWord.set(word, group.sentence || getWordContext(content, word, 50))
+    }
+  }
   const words = wordsToGenerate.map(w => ({
     word: w.word,
-    context: getWordContext(article.value.content, w.word, 50)
+    context: contextByWord.get(w.word) || getWordContext(content, w.word, 50)
   }))
 
-  batchAbortController = new AbortController()
+  // 用局部变量持有 controller：onUnmounted 会把模块变量置 null，
+  // 若后续逻辑再读 batchAbortController.signal 会抛 TypeError（本函数在 abort 后才恢复执行）
+  const controller = new AbortController()
+  batchAbortController = controller
   batchProgress.value = { completed: 0, total: words.length, running: true, error: null, failedWords: [] }
 
   try {
@@ -1025,11 +1042,11 @@ async function autoGenerateAllWords() {
         }
       },
       undefined,
-      batchAbortController.signal
+      controller.signal
     )
 
     // 页面已离开（取消）：丢弃结果，不再写库
-    if (batchAbortController.signal.aborted) return
+    if (controller.signal.aborted) return
 
     const failedWords = []
     for (const result of results) {
@@ -1057,7 +1074,7 @@ async function autoGenerateAllWords() {
     await loadArticleWords()
   } catch (error) {
     console.error('批量生成失败:', error.message)
-    if (!batchAbortController.signal.aborted) {
+    if (!controller.signal.aborted) {
       await alert(`批量生成词义失败：${error.message}\n\n退出文章后重新进入可自动重试。`)
     }
   } finally {
@@ -1158,7 +1175,7 @@ const renderedParagraphs = computed(() => {
       </button>
     </div>
 
-    <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 sm:p-6">
+    <div class="reader-card bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-4 sm:p-6">
       <div class="flex flex-wrap items-center gap-3 mb-4">
         <h1 class="text-lg sm:text-xl font-bold text-gray-900 dark:text-neutral-100">{{ article.title }}</h1>
         <button
@@ -1319,3 +1336,24 @@ const renderedParagraphs = computed(() => {
   </div>
   </PageLayout>
 </template>
+
+<style scoped>
+/* ============================================================
+   手机端：文章主体不再套卡片外框，正文直接铺满屏幕宽度。
+   原来是「页面留白 px-4 → 白色卡片边框 + 圆角 + p-4 内边距」两层收窄，
+   阅读时左右可用的正文宽度被吃掉约 60px。
+   这里去掉卡片的边框/圆角/阴影/底色，并用负外边距抵消页面留白，
+   只保留 p-4 作为正文与屏幕边缘的安全距离（约 16px）。
+   ============================================================ */
+@media (max-width: 639px) {
+  .reader-card {
+    /* 抵消 PageLayout 的 px-4 */
+    margin-left: -1rem;
+    margin-right: -1rem;
+    background-color: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+</style>

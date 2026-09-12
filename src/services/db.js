@@ -599,6 +599,14 @@ export const exportService = {
     return articleId
   },
 
+  /**
+   * 全量备份导出（v3 格式）：
+   * 备份内的引用一律使用稳定键，不再携带原库自增 id ——
+   *   - 子表对文章的引用 → articleUid（文章业务键；导出前给缺失 uid 的老文章补齐）
+   *   - 子表对单词的引用 → wordIndex（单词在备份 words 数组中的下标）
+   * 旧 v2 格式直接引用原库 id，而导入端按数组下标建映射，两者永不对齐
+   * （Dexie 自增 id 从 1 起、下标从 0 起），导致子记录错挂到其他文章或被静默丢弃。
+   */
   async exportFull() {
     const articles = await db.articles.toArray()
     const words = await db.words.toArray()
@@ -606,127 +614,163 @@ export const exportService = {
     const contextTranslations = await db.contextTranslations.toArray()
     const selectionTranslations = await db.selectionTranslations.toArray()
 
+    // 老文章可能缺 uid：导出前补齐并回写，保证备份内引用可用
+    const articleUidById = new Map()
+    for (const a of articles) {
+      if (!a.uid) {
+        a.uid = newUid()
+        await db.articles.update(a.id, { uid: a.uid })
+      }
+      articleUidById.set(a.id, a.uid)
+    }
+    const wordIndexById = new Map(words.map((w, i) => [w.id, i]))
+
     return {
-      version: 2,
+      version: 3,
       type: 'full_backup',
       exportDate: new Date().toISOString(),
       data: {
         articles: articles.map(({ id, ...rest }) => rest),
-        words: words.map(({ id, phonetic, ...rest }) => rest),
-        wordMarks: wordMarks.map(({ id, ...rest }) => rest),
-        contextTranslations: contextTranslations.map(({ id, ...rest }) => rest),
-        selectionTranslations: selectionTranslations.map(({ id, ...rest }) => rest)
+        words: words.map(({ id, phonetic, articleId, ...rest }) => ({
+          ...rest,
+          articleUid: articleUidById.get(articleId) || null
+        })),
+        wordMarks: wordMarks.map(({ id, wordId, articleId, ...rest }) => ({
+          ...rest,
+          wordIndex: wordIndexById.has(wordId) ? wordIndexById.get(wordId) : null,
+          articleUid: articleUidById.get(articleId) || null
+        })),
+        contextTranslations: contextTranslations.map(({ id, wordId, articleId, ...rest }) => ({
+          ...rest,
+          wordIndex: wordIndexById.has(wordId) ? wordIndexById.get(wordId) : null,
+          articleUid: articleUidById.get(articleId) || null
+        })),
+        selectionTranslations: selectionTranslations.map(({ id, articleId, ...rest }) => ({
+          ...rest,
+          articleUid: articleUidById.get(articleId) || null
+        }))
       }
     }
   },
 
+  /** 导入 v3 全量备份：按 uid（文章）与 (word, articleId)（单词）去重合并，
+   *  备份内的 articleUid / wordIndex 引用在此重映射为本地自增 id。 */
   async importFull(data) {
-    if (data.type !== 'full_backup' || data.version !== 2) {
+    if (data.type !== 'full_backup') {
       throw new Error('不是全量备份文件')
+    }
+    if (data.version !== 3) {
+      throw new Error(`备份格式版本不兼容（v${data.version}）。旧版备份的外键引用存在缺陷，导入会错乱；请用当前版本重新导出后再导入`)
     }
 
     const { articles, words, wordMarks, contextTranslations, selectionTranslations } = data.data
     const stats = { articles: 0, words: 0, marks: 0, translations: 0, selectionTranslations: 0, skipped: 0 }
 
     await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.selectionTranslations, async () => {
+      // 1. 文章：按 uid 去重合并，建立 备份 uid → 本地文章 id 映射
       const existingArticles = await db.articles.toArray()
-      const articleUidMap = {}
-      existingArticles.forEach(a => { if (a.uid) articleUidMap[a.uid] = a.id })
+      const localArticleIdByUid = {}
+      existingArticles.forEach(a => { if (a.uid) localArticleIdByUid[a.uid] = a.id })
 
-      const articleIdMap = {}
-      for (let i = 0; i < articles.length; i++) {
-        const a = articles[i]
-        const existingId = a.uid && articleUidMap[a.uid]
-        if (existingId) {
-          articleIdMap[i] = existingId
+      const articleIdByUid = {}
+      for (const a of articles) {
+        const uid = a.uid || newUid()
+        const existingId = localArticleIdByUid[uid]
+        if (existingId != null) {
+          articleIdByUid[uid] = existingId
           stats.skipped++
         } else {
+          const { uid: _dropUid, ...aRest } = a
           const id = await db.articles.add({
-            ...a,
-            uid: a.uid || newUid(),
+            ...aRest,
+            uid,
             createdAt: a.createdAt || new Date(),
             updatedAt: a.updatedAt || new Date()
           })
-          articleIdMap[i] = id
+          articleIdByUid[uid] = id
+          localArticleIdByUid[uid] = id
           stats.articles++
         }
       }
+      const localArticleIdOf = (uid) => (uid != null ? articleIdByUid[uid] : undefined)
 
+      // 2. 单词：按 (word, articleId) 去重合并，建立 备份下标 → 本地 word id 映射
       const existingWords = await db.words.toArray()
       const wordMap = {}
       existingWords.forEach(w => { wordMap[`${w.word}_${w.articleId}`] = w.id })
 
-      const wordIdMap = {}
+      const wordIdByIndex = {}
       for (let i = 0; i < words.length; i++) {
         const w = words[i]
         const lower = w.word.toLowerCase()
-        const articleId = articleIdMap[w.articleId]
+        const articleId = localArticleIdOf(w.articleUid)
         if (articleId == null) continue
         const key = `${lower}_${articleId}`
         if (wordMap[key]) {
-          wordIdMap[i] = wordMap[key]
+          wordIdByIndex[i] = wordMap[key]
         } else {
-          const { phonetic, articleId: oldArticleId, ...wRest } = w
+          const { phonetic, articleUid, ...wRest } = w
           const id = await db.words.add({
             ...wRest,
             word: lower,
             articleId,
             updatedAt: w.updatedAt || new Date()
           })
-          wordIdMap[i] = id
+          wordIdByIndex[i] = id
+          wordMap[key] = id
           stats.words++
         }
       }
 
+      // 3. 标记：wordIndex + articleUid → 本地 id
       const existingMarks = await db.wordMarks.toArray()
       const markSet = new Set(existingMarks.map(m => `${m.wordId}_${m.articleId}_${m.occKey}`))
 
       for (const m of wordMarks) {
-        const wordId = wordIdMap[m.wordId]
-        const articleId = articleIdMap[m.articleId]
-        if (wordId && articleId) {
-          const key = `${wordId}_${articleId}_${m.occKey}`
-          if (!markSet.has(key)) {
-            await db.wordMarks.add({
-              wordId,
-              articleId,
-              occKey: m.occKey || '0',
-              createdAt: m.createdAt || new Date()
-            })
-            markSet.add(key)
-            stats.marks++
-          }
+        const wordId = m.wordIndex != null ? wordIdByIndex[m.wordIndex] : undefined
+        const articleId = localArticleIdOf(m.articleUid)
+        if (wordId == null || articleId == null) continue
+        const key = `${wordId}_${articleId}_${m.occKey}`
+        if (!markSet.has(key)) {
+          await db.wordMarks.add({
+            wordId,
+            articleId,
+            occKey: m.occKey || '0',
+            createdAt: m.createdAt || new Date()
+          })
+          markSet.add(key)
+          stats.marks++
         }
       }
 
+      // 4. 语境翻译：同标记
       const existingTranslations = await db.contextTranslations.toArray()
       const translationSet = new Set(existingTranslations.map(t => `${t.wordId}_${t.articleId}_${t.occKey || '0'}`))
 
       for (const t of contextTranslations) {
-        const wordId = wordIdMap[t.wordId]
-        const articleId = articleIdMap[t.articleId]
-        if (wordId && articleId) {
-          const key = `${wordId}_${articleId}_${t.occKey || '0'}`
-          if (!translationSet.has(key)) {
-            await db.contextTranslations.add({
-              wordId,
-              articleId,
-              occKey: t.occKey || '0',
-              translation: t.translation,
-              createdAt: t.createdAt || new Date()
-            })
-            translationSet.add(key)
-            stats.translations++
-          }
+        const wordId = t.wordIndex != null ? wordIdByIndex[t.wordIndex] : undefined
+        const articleId = localArticleIdOf(t.articleUid)
+        if (wordId == null || articleId == null) continue
+        const key = `${wordId}_${articleId}_${t.occKey || '0'}`
+        if (!translationSet.has(key)) {
+          await db.contextTranslations.add({
+            wordId,
+            articleId,
+            occKey: t.occKey || '0',
+            translation: t.translation,
+            createdAt: t.createdAt || new Date()
+          })
+          translationSet.add(key)
+          stats.translations++
         }
       }
 
-      // 划词翻译缓存（旧备份无此字段时降级为空数组，兼容不报错）
+      // 5. 划词翻译缓存：articleUid → 本地文章 id（旧备份无此字段时降级为空数组）
       const existingSelectionTranslations = await db.selectionTranslations.toArray()
       const selectionSet = new Set(existingSelectionTranslations.map(t => `${t.articleId}_${t.selectionHash}`))
 
       for (const t of (selectionTranslations || [])) {
-        const articleId = articleIdMap[t.articleId]
+        const articleId = localArticleIdOf(t.articleUid)
         if (articleId == null) continue
         const key = `${articleId}_${t.selectionHash}`
         if (!selectionSet.has(key)) {

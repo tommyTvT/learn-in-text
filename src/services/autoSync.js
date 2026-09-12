@@ -2,13 +2,13 @@ import { ref, watch } from 'vue'
 import { useSettingsStore } from '../stores/settings'
 import { useAuthStore } from '../stores/auth'
 import { syncNow } from './sync'
+import { getOwnershipPending } from './localData'
 
 const LAST_SYNC_KEY = 'learn_in_text_last_sync'
-const LOCK_KEY = 'learn_in_text_sync_lock'
+// 跨标签页同步锁名：优先使用 Web Locks API（原子 try-acquire）
+const LOCK_NAME = 'learn_in_text_sync_lock'
 // 失败退避窗口（毫秒）：连续失败时避免高频重试
 const RETRY_BACKOFF_MS = 60_000
-// 跨标签页锁有效期（毫秒）：防止多个标签页同时全量同步
-const LOCK_TTL_MS = 90_000
 // 自动同步固定间隔（分钟）：同步间隔固定为 5 分钟，不再由用户配置
 const AUTO_SYNC_INTERVAL_MIN = 5
 
@@ -55,33 +55,74 @@ const SOURCE_LABELS = {
   login: '登录后同步'
 }
 
+/** 各表中文名（调试输出用） */
+const TABLE_LABELS = {
+  articles: '文章',
+  words: '单词',
+  word_marks: '标记',
+  context_translations: '翻译'
+}
+
+/** 把统计对象（如 detail.pushed）转为「中文表名 → 数量」，只保留非零项 */
+function nonzeroCounts(counts) {
+  const out = {}
+  for (const [table, value] of Object.entries(counts || {})) {
+    if (value) out[TABLE_LABELS[table] || table] = value
+  }
+  return out
+}
+
 /**
- * debug 模式下的同步数据输出（浏览器控制台）。
- * 仅当设置中开启「调试模式」时打印，包含触发来源、结果、耗时、
- * 各表推送/新增/更新/删除统计以及云端/本地记录数。
+ * debug 模式下的同步输出（浏览器控制台），仅当设置中开启「调试模式」时打印。
+ * 自动同步每 5 分钟触发一次，为避免刷屏按结果分级输出：
+ * - 失败：打印错误信息，便于排查；
+ * - 成功但无数据变更：仅打印一行摘要（时间 · 来源 · 耗时）；
+ * - 成功且有变更：打印分组详情，表格只列出发生变化的数据表。
  */
 function debugLogSync(source, success, message, detail) {
   const settings = useSettingsStore()
   if (!settings.debugMode) return
 
   const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  const tag = success ? '✔ 同步成功' : '✘ 同步失败'
-  const title = `${time} · ${SOURCE_LABELS[source] || source || '未知'} · ${tag}`
-  console.group(`%c[LearnInText 同步] %c${title}`, 'color:#4f8cff;font-weight:bold', 'color:#8a8a8a')
-  console.log(message)
-  if (detail) {
-    console.log(`触发来源：${source || '未知'}`)
-    console.log(`耗时：${(detail.durationMs / 1000).toFixed(2)}s`)
-    console.log('云端记录数：', detail.cloud)
-    console.log('本地记录数：', detail.local)
-    console.log('变更明细（各表推送 / 新增 / 更新 / 删除）：')
-    console.table({
-      '推送云端': detail.pushed || {},
-      '本地新增': detail.added || {},
-      '更新': detail.updated || {},
-      '删除': detail.deleted || {}
-    })
+  const sourceLabel = SOURCE_LABELS[source] || source || '未知'
+
+  if (!success) {
+    console.group(
+      `%c[LearnInText 同步] %c${time} · ${sourceLabel} · ✘ 同步失败`,
+      'color:#e5484d;font-weight:bold',
+      'color:#8a8a8a'
+    )
+    console.error(message)
+    console.groupEnd()
+    return
   }
+
+  const groups = [
+    ['推送云端', detail?.pushed],
+    ['本地新增', detail?.added],
+    ['更新', detail?.updated],
+    ['删除', detail?.deleted]
+  ].map(([label, counts]) => [label, nonzeroCounts(counts)])
+  const duration = detail ? `${(detail.durationMs / 1000).toFixed(2)}s` : '-'
+
+  // 无变更（后台同步最常见的结果）：只留一行，不展开表格
+  if (!groups.some(([, counts]) => Object.keys(counts).length)) {
+    console.log(
+      `%c[LearnInText 同步]%c ${time} · ${sourceLabel} · ✔ 无变更 · 耗时 ${duration}`,
+      'color:#4f8cff;font-weight:bold',
+      'color:#8a8a8a'
+    )
+    return
+  }
+
+  console.group(
+    `%c[LearnInText 同步] %c${time} · ${sourceLabel} · ✔ 同步成功`,
+    'color:#4f8cff;font-weight:bold',
+    'color:#8a8a8a'
+  )
+  console.log(message)
+  console.log(`耗时 ${duration} · ${detail?.incremental ? '增量同步' : '全量同步'}`)
+  console.table(Object.fromEntries(groups.filter(([, counts]) => Object.keys(counts).length)))
   console.groupEnd()
 }
 
@@ -172,27 +213,21 @@ function autoSyncEnabled() {
   return !!s.autoSync
 }
 
-function acquireLock() {
-  const now = Date.now()
-  try {
-    const raw = localStorage.getItem(LOCK_KEY)
-    if (raw) {
-      const t = Number(raw)
-      if (Number.isFinite(t) && now - t < LOCK_TTL_MS) return false
-    }
-    localStorage.setItem(LOCK_KEY, String(now))
-    return true
-  } catch {
-    return true
+/**
+ * 跨标签页同步锁：优先 Web Locks API（浏览器级原子 try-acquire，
+ * 无 TTL 过期问题），不支持的环境退化为无锁执行。
+ * 旧的 localStorage 时间戳锁存在读-改-写竞态，且 90s TTL 过期后
+ * 慢同步期间其他标签页会并发进入，双写导致云端重复行，故弃用。
+ */
+function tryWithLock(fn) {
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+    return Promise.resolve(fn())
   }
-}
-
-function releaseLock() {
-  try {
-    localStorage.removeItem(LOCK_KEY)
-  } catch {
-    // 忽略
-  }
+  return navigator.locks.request(LOCK_NAME, { ifAvailable: true }, (lock) => {
+    // 拿不到锁说明其他标签页正在同步：静默跳过本次
+    if (!lock) return null
+    return fn()
+  })
 }
 
 /**
@@ -202,24 +237,30 @@ function releaseLock() {
  */
 async function runSync(source = 'auto') {
   if (paused) return
+  // 本地数据归属决策未完成：一切后台自动同步静默跳过。
+  // 该标记持久化在 localStorage（区别于内存的 paused），弹窗未决时
+  // 关闭/刷新页面后依然生效，防止残留数据被推给新账号或被误判删除。
+  if (getOwnershipPending()) return
   if (!autoSyncEnabled()) return
   if (running || !isConfigured()) return
   if (Date.now() - lastAttemptAt < RETRY_BACKOFF_MS) return
-  if (!acquireLock()) return
 
   running = true
   lastAttemptAt = Date.now()
   try {
-    const result = await syncNow()
-    storeState(true, result.message)
-    debugLogSync(source, true, result.message, result.detail)
-  } catch (error) {
-    const message = error.message || '同步失败'
-    storeState(false, message)
-    debugLogSync(source, false, message, null)
+    await tryWithLock(async () => {
+      try {
+        const result = await syncNow()
+        storeState(true, result.message)
+        debugLogSync(source, true, result.message, result.detail)
+      } catch (error) {
+        const message = error.message || '同步失败'
+        storeState(false, message)
+        debugLogSync(source, false, message, null)
+      }
+    })
   } finally {
     running = false
-    releaseLock()
   }
 }
 

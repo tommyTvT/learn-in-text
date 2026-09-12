@@ -253,8 +253,8 @@ export function getWordContext(text, word, maxWords = 0, occurrence = 0) {
 // 供“单词在文中翻译”与“划词翻译语境提取”共用，避免两处规则漂移
 export const SENTENCE_BOUNDARY_REGEX = /[.!?]+["')\]]*(?=\s|$)|[.!?]+["')\]]+(?=[A-Z])|:(?=\s)/g
 
-// 提取目标词所在句子及前后语境，用于“在文中”翻译：
-// sentence 为目标词所在的单句（限定翻译输出范围，保证显示简短），
+// 提取目标词所在句子及前后语境，用于“在文中”释义：
+// sentence 为目标词所在的单句（限定释义所依据的句子，保证解释贴合此处用法），
 // context 额外带上前后各 extraSentences 句（传给 AI 帮助其贴合语境理解）
 export function getWordSentenceWithContext(text, word, occurrence = 0, extraSentences = 1) {
   const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
@@ -294,6 +294,88 @@ export function getWordSentenceWithContext(text, word, occurrence = 0, extraSent
   const to = Math.min(sentences.length - 1, targetIdx + extraSentences)
   const context = sentences.slice(from, to + 1).map(s => s.text).join(' ')
   return { sentence, context }
+}
+
+/** 转义正则元字符：词表可能含 ' - 等字符，拼入 \b词\b 前需转义避免正则异常 */
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 按完整句子为单词分组，供「合批生成词义」打包请求使用：
+ * 每个单词归入其首次出现所在的完整句子，分组按句子在全文中的先后顺序排列；
+ * 未能定位（单词未在文中出现等）的词归入 sentence 为空串的兜底分组。
+ * 句子边界与 getWordSentenceWithContext / getSelectionContext 共用同一套规则。
+ * @param {string} text 文章全文
+ * @param {string[]} words 待分组单词（通常为 parseArticle 得到的去重词表）
+ * @returns {Array<{ sentence: string, words: string[] }>}
+ */
+export function groupWordsBySentence(text, words) {
+  const source = String(text || '')
+  const list = Array.isArray(words) ? words : []
+  if (!source || !list.length) return []
+
+  // 一次性切分全文，得到按位置升序排列的句子区间（与 getWordSentenceWithContext 同规则）
+  SENTENCE_BOUNDARY_REGEX.lastIndex = 0
+  const sentences = []
+  let start = 0
+  let b
+  while ((b = SENTENCE_BOUNDARY_REGEX.exec(source)) !== null) {
+    const end = b.index + b[0].length
+    const piece = source.slice(start, end).trim()
+    if (piece) sentences.push({ start, end, text: piece })
+    start = end
+  }
+  if (start < source.length) {
+    const piece = source.slice(start).trim()
+    if (piece) sentences.push({ start, end: source.length, text: piece })
+  }
+  if (!sentences.length) return [{ sentence: '', words: [...list] }]
+
+  // 句子区间按 start 升序：二分查找包含目标下标的句子
+  const findSentenceIndex = (index) => {
+    let lo = 0
+    let hi = sentences.length - 1
+    let found = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (sentences[mid].start <= index) {
+        found = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    return found >= 0 && index < sentences[found].end ? found : -1
+  }
+
+  const grouped = new Map() // 句子下标 → 该句中的单词（保留首次出现顺序）
+  const fallback = []       // 定位失败的单词
+  for (const raw of list) {
+    const word = String(raw || '').trim()
+    if (!word) continue
+    let match = null
+    try {
+      match = new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i').exec(source)
+    } catch {
+      match = null
+    }
+    const idx = match ? findSentenceIndex(match.index) : -1
+    if (idx < 0) {
+      fallback.push(word)
+      continue
+    }
+    if (!grouped.has(idx)) grouped.set(idx, [])
+    const bucket = grouped.get(idx)
+    if (!bucket.includes(word)) bucket.push(word)
+  }
+
+  const result = [...grouped.keys()]
+    .sort((a, b) => a - b)
+    .map(idx => ({ sentence: sentences[idx].text, words: grouped.get(idx) }))
+  // 兜底分组置于末尾：调用方对其回退到旧的「50 词窗口」上下文
+  if (fallback.length) result.push({ sentence: '', words: fallback })
+  return result
 }
 
 // 划词翻译：选中文本的规范化（小写 + 空白折叠 + trim），

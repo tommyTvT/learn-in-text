@@ -1,12 +1,12 @@
-﻿<script setup>
+<script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useSettingsStore } from '../../stores/settings'
 import { handleEmailConfirmation, readableError } from '../../services/auth'
-import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner } from '../../services/localData'
-import { pauseAutoSync, resumeAutoSync } from '../../services/autoSync'
+import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner, setOwnershipPending, clearOwnershipPending } from '../../services/localData'
+import { pauseAutoSync, resumeAutoSync, syncAfterLogin } from '../../services/autoSync'
 import LocalDataModal from '../../components/Common/LocalDataModal.vue'
 import { LoaderCircle, CheckCircle2, XCircle } from 'lucide-vue-next'
 
@@ -43,6 +43,9 @@ async function decideLocalDataOwnership() {
   const stats = await getLocalDataStats()
   const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
   if (hasData && getLocalDataOwner() !== auth.username) {
+    // 持久化「归属决策待定」标记：弹窗未决时关闭/刷新页面，
+    // 下次启动该标记继续拦截后台自动同步，防止数据误推/误删
+    setOwnershipPending(auth.username)
     localDataStats.value = stats
     showLocalDataModal.value = true
     status.value = 'success'
@@ -54,7 +57,10 @@ async function decideLocalDataOwnership() {
     await settingsStore.resetSettings()
   }
   setLocalDataOwner(auth.username)
+  clearOwnershipPending()
   await auth.syncSettingsAfterLogin()
+  // 与登录/注册页保持一致：验证即登录，立即全量同步一次，不等定时任务
+  await syncAfterLogin()
   resumeAutoSync()
   finishAndRedirect()
 }
@@ -85,12 +91,14 @@ onMounted(async () => {
 
 function onLocalDataDone() {
   showLocalDataModal.value = false
+  clearOwnershipPending()
   resumeAutoSync()
   finishAndRedirect()
 }
 
 function onLocalDataCancel() {
   showLocalDataModal.value = false
+  clearOwnershipPending()
   resumeAutoSync()
   // 已取消登录（登出），停在验证结果页
 }

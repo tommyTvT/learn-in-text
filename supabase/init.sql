@@ -67,9 +67,11 @@ create table if not exists public.context_translations (
 );
 
 -- 用户资料表：username 唯一绑定 auth.users.id
+-- username 唯一性由下方部分唯一索引保证（'' 行不参与），避免多个
+-- 未绑定用户名的注册因 '' 重复而 unique 违约
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
-  username text unique not null default '',
+  username text not null default '',
   email text not null default '',
   "createdAt" timestamptz not null default now()
 );
@@ -92,7 +94,10 @@ create index if not exists idx_words_username_article on public.words (username,
 create index if not exists idx_word_marks_username_article on public.word_marks (username, "articleId");
 create index if not exists idx_word_marks_username_word on public.word_marks (username, "wordId");
 create index if not exists idx_context_translations_username_article on public.context_translations (username, "articleId");
--- profiles.username 已有 unique 约束（自带索引），无需另建
+-- username 部分唯一索引：空 username（未绑定）行不参与唯一约束
+create unique index if not exists profiles_username_unique
+  on public.profiles (username)
+  where username <> '';
 -- email 部分唯一索引：空 email 不参与唯一约束（兼容未确认邮箱的注册流程）
 create unique index if not exists profiles_email_unique
   on public.profiles (email)
@@ -289,11 +294,9 @@ create policy "select own profile" on public.profiles
   for select
   using ((select auth.uid()) = id);
 
-drop policy if exists "update own profile" on public.profiles;
-create policy "update own profile" on public.profiles
-  for update
-  using ((select auth.uid()) = id)
-  with check ((select auth.uid()) = id);
+-- 不再授予/定义 profiles 的 UPDATE 策略：authenticated 的 UPDATE 权限已收回
+-- （0011），email 会被恶意抢占导致他人无法注册；email 的合法同步路径只有
+-- handle_new_user 触发器（security definer），username 设置走 set_username RPC
 
 -- 说明：tombstones 表目前仅存在于本地 Dexie，云端未建表；若未来云端建表，
 -- 需参照上面对应补一条 auth_user_access 策略。
@@ -305,7 +308,9 @@ grant select, insert, update, delete
   on public.articles, public.words, public.word_marks,
      public.context_translations, public.user_settings
   to authenticated;
-grant select, update on public.profiles to authenticated;
+-- profiles 仅授予 SELECT：UPDATE 已收回（0011），防止 authenticated
+-- 恶意抢占他人 email；合法更新走 security definer 的触发器 / RPC，不受影响
+grant select on public.profiles to authenticated;
 
 grant usage, select on sequence public.articles_id_seq to authenticated;
 grant usage, select on sequence public.words_id_seq to authenticated;

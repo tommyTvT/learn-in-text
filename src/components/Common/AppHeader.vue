@@ -11,12 +11,12 @@ const navLinks = [
 
 <template>
   <nav class="bg-white dark:bg-neutral-900 shadow-sm border-b border-gray-200 dark:border-neutral-800">
-    <div class="mx-auto px-4 sm:px-6 lg:px-8 w-[min(95vw,1600px)]">
-      <div class="flex justify-between h-14">
+    <div class="mx-auto px-4 sm:px-6 lg:px-8 w-full sm:w-[min(95vw,1600px)]">
+      <div class="flex justify-between h-12 sm:h-14">
         <div class="flex items-center">
           <ULink to="/" class="flex items-center space-x-2">
-            <span class="text-xl">📚</span>
-            <span class="text-lg font-bold text-gray-900 dark:text-neutral-100">Learn in Text</span>
+            <span class="text-lg sm:text-xl">📚</span>
+            <span class="text-base sm:text-lg font-bold text-gray-900 dark:text-neutral-100">Learn in Text</span>
           </ULink>
         </div>
         <div class="hidden md:flex items-center space-x-2">

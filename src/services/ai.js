@@ -99,9 +99,202 @@ async function request(path, { baseURL, apiKey, body, timeoutMs, signal }) {
   }
 }
 
-async function createChatCompletion(params, type = 'text', signal) {
+/**
+ * 归一化不同供应商的 token 用量字段：
+ * - 缓存命中：DeepSeek 用 prompt_cache_hit_tokens，OpenAI 用 prompt_tokens_details.cached_tokens
+ * - 缓存未命中：DeepSeek 直接给 prompt_cache_miss_tokens，其余按「输入 - 命中」推算
+ * @param {object} usage 接口返回的 usage 字段
+ * @returns {{prompt: number, completion: number, total: number, cached: number, miss: number}|null}
+ */
+function readUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  const prompt = Number(usage.prompt_tokens) || 0
+  const completion = Number(usage.completion_tokens) || 0
+  const total = Number(usage.total_tokens) || prompt + completion
+  const cached = Number(usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens) || 0
+  const miss = Number(usage.prompt_cache_miss_tokens ?? Math.max(0, prompt - cached)) || 0
+  return { prompt, completion, total, cached, miss }
+}
+
+// ---- 费用计算 ----
+// 单价表（元 / 百万 tokens）。空闲时段价格为高峰时段的一半。
+const USAGE_PRICE = {
+  offPeak: { cached: 0.02, miss: 1, output: 4 },
+  peak: { cached: 0.04, miss: 2, output: 8 }
+}
+
+// 高峰时段：北京时间周一至周五 9:00–12:00、14:00–18:00；其余（含周末）为空闲时段。
+const PEAK_WINDOWS = [
+  [9 * 60, 12 * 60],
+  [14 * 60, 18 * 60]
+]
+
+/**
+ * 取某时刻的北京时间（UTC+8）星期与「时:分」偏移，
+ * 不依赖运行设备时区，保证跨时区计算结果一致。
+ * @returns {{day: number, minutes: number}} day：0=周日 … 6=周六
+ */
+function beijingClock(at) {
+  const d = new Date(at + 8 * 60 * 60 * 1000)
+  return { day: d.getUTCDay(), minutes: d.getUTCHours() * 60 + d.getUTCMinutes() }
+}
+
+/** 判断某时刻是否处于空闲时段（高峰：北京时间周一至周五 9:00–12:00、14:00–18:00） */
+function isOffPeak(at = Date.now()) {
+  const { day, minutes } = beijingClock(at)
+  if (day === 0 || day === 6) return true // 周末全天空闲
+  return !PEAK_WINDOWS.some(([start, end]) => minutes >= start && minutes < end)
+}
+
+/** 金额格式化（元）：最多 6 位小数并去掉末尾多余的 0 */
+function formatMoney(yuan) {
+  if (!(yuan > 0)) return '0 元'
+  return `${Number(yuan.toFixed(6))} 元`
+}
+
+/** 功能名归一化：去掉「（合批 20 词）」这类参数后缀，便于分组统计 */
+function usageGroupLabel(label) {
+  return (label || 'AI 请求').replace(/（.*$/, '')
+}
+
+/** 按单价计算一条用量的费用明细（元）：输入命中 / 输入未命中 / 输出 */
+function usageCost(u, price) {
+  return {
+    cached: (u.cached * price.cached) / 1e6,
+    miss: (u.miss * price.miss) / 1e6,
+    output: (u.completion * price.output) / 1e6
+  }
+}
+
+// 当前活跃的批量用量收集器：批量多线程生成时逐条打印会刷屏，
+// 改为批次内静默累加，批次结束时由 withAiUsageSummary 一次性汇总输出。
+let usageBatch = null
+
+/**
+ * 调试模式下的 AI token 用量输出。
+ * - 非批量场景：直接打印一行（输入/输出/合计 tokens、缓存命中与本次费用）；
+ * - 批量场景（usageBatch 存在）：只累加到批次，由 withAiUsageSummary 在最后统一打印。
+ * @param {string} label 功能名（如「单词释义」）
+ * @param {string} type 模型类型（text / vision）
+ * @param {object} usage 接口返回的 usage 字段
+ */
+function debugLogAiUsage(label, type, usage) {
+  if (!useSettingsStore().debugMode) return
+  const u = readUsage(usage)
+  if (!u) return
+  if (usageBatch) {
+    usageBatch.items.push({ label: usageGroupLabel(label), type, at: Date.now(), ...u })
+    return
+  }
+  const off = isOffPeak()
+  const price = off ? USAGE_PRICE.offPeak : USAGE_PRICE.peak
+  const cost = usageCost(u, price)
+  const typeLabel = type === 'vision' ? '视觉' : '文本'
+  const hitPct = u.prompt ? Math.round((u.cached / u.prompt) * 100) : 0
+  console.log(
+    `%c[LearnInText AI]%c ${label}（${typeLabel}）· 输入 ${u.prompt} tokens（缓存命中 ${u.cached} · ${hitPct}%，未命中 ${u.miss}）· 输出 ${u.completion} tokens · 合计 ${u.total} tokens · ${off ? '空闲' : '高峰'}时段 ${formatMoney(cost.cached + cost.miss + cost.output)}`,
+    'color:#22a06b;font-weight:bold',
+    'color:inherit'
+  )
+}
+
+/** 调试模式下的 AI 请求失败输出；批量场景只记录，随汇总一并打印 */
+function debugLogAiError(label, error) {
+  if (!useSettingsStore().debugMode) return
+  const message = `${usageGroupLabel(label)}失败: ${error?.message || error}`
+  if (usageBatch) {
+    usageBatch.errors.push(message)
+    return
+  }
+  console.error(`[LearnInText AI] ${message}`)
+}
+
+/**
+ * 批量 AI 请求的用量汇总包装器（调试模式）。
+ * 批次内所有请求的 token 用量静默累加，结束后一次性打印：
+ * 分组用量表、输入/输出/命中合计、按空闲/高峰单价计算的费用合计，以及失败次数。
+ * 非调试模式直接执行原逻辑，无任何额外开销。
+ * @param {string} label 批次名（如「批量生成单词释义」）
+ * @param {() => Promise<any>} fn 批次逻辑
+ */
+export async function withAiUsageSummary(label, fn) {
+  if (!useSettingsStore().debugMode) return fn()
+  const prev = usageBatch
+  const batch = { label, items: [], errors: [], start: Date.now() }
+  usageBatch = batch
+  try {
+    return await fn()
+  } finally {
+    usageBatch = prev
+    printUsageBatchSummary(batch)
+  }
+}
+
+/** 汇总打印批次用量与费用 */
+function printUsageBatchSummary(batch) {
+  if (!batch.items.length && !batch.errors.length) return
+  const groups = new Map()
+  const totals = { prompt: 0, completion: 0, total: 0, cached: 0, miss: 0 }
+  const cost = {
+    offPeak: { cached: 0, miss: 0, output: 0 },
+    peak: { cached: 0, miss: 0, output: 0 }
+  }
+  for (const item of batch.items) {
+    let g = groups.get(item.label)
+    if (!g) {
+      g = { 功能: item.label, 请求次数: 0, 输入: 0, 缓存命中: 0, 输出: 0, 合计: 0 }
+      groups.set(item.label, g)
+    }
+    g.请求次数++
+    g.输入 += item.prompt
+    g.缓存命中 += item.cached
+    g.输出 += item.completion
+    g.合计 += item.total
+    for (const key of ['prompt', 'completion', 'total', 'cached', 'miss']) totals[key] += item[key]
+    const off = isOffPeak(item.at)
+    const c = usageCost(item, off ? USAGE_PRICE.offPeak : USAGE_PRICE.peak)
+    const bucket = off ? cost.offPeak : cost.peak
+    bucket.cached += c.cached
+    bucket.miss += c.miss
+    bucket.output += c.output
+  }
+
+  const sumCost = (b) => b.cached + b.miss + b.output
+  const hitPct = totals.prompt ? Math.round((totals.cached / totals.prompt) * 100) : 0
+  const duration = ((Date.now() - batch.start) / 1000).toFixed(1)
+  const costLine = (name, b) =>
+    `费用（${name}时段）：缓存命中 ${formatMoney(b.cached)} + 未命中 ${formatMoney(b.miss)} + 输出 ${formatMoney(b.output)} = ${formatMoney(sumCost(b))}`
+
+  console.group(
+    `%c[LearnInText AI] %c${batch.label} · 汇总 ${batch.items.length} 次请求 · 耗时 ${duration}s`,
+    'color:#22a06b;font-weight:bold',
+    'color:#8a8a8a'
+  )
+  if (groups.size > 1) console.table([...groups.values()])
+  console.log(`输入 ${totals.prompt} tokens（缓存命中 ${totals.cached} · ${hitPct}%，未命中 ${totals.miss}）`)
+  console.log(`输出 ${totals.completion} tokens · 合计 ${totals.total} tokens`)
+  if (sumCost(cost.offPeak) > 0) console.log(costLine('空闲', cost.offPeak))
+  if (sumCost(cost.peak) > 0) console.log(costLine('高峰', cost.peak))
+  console.log(
+    `%c合计费用：${formatMoney(sumCost(cost.offPeak) + sumCost(cost.peak))}`,
+    'font-weight:bold'
+  )
+  if (batch.errors.length) {
+    console.warn(`请求失败 ${batch.errors.length} 次：\n${[...new Set(batch.errors)].slice(0, 5).join('\n')}`)
+  }
+  console.groupEnd()
+}
+
+async function createChatCompletion(params, type = 'text', signal, label = '') {
   const { baseURL, apiKey, timeoutMs } = getModelConfig(type)
-  return request('/chat/completions', { baseURL, apiKey, body: params, timeoutMs, signal })
+  try {
+    const res = await request('/chat/completions', { baseURL, apiKey, body: params, timeoutMs, signal })
+    debugLogAiUsage(label, type, res?.usage)
+    return res
+  } catch (error) {
+    debugLogAiError(label, error)
+    throw error
+  }
 }
 
 /** 估算文本 token 数（粗略近似，仅用于进度条）：英文约 4 字符/token，中文约 1 字符/token */
@@ -119,20 +312,24 @@ function estimateTokens(text) {
  * @param {(delta: string, full: string) => void} onDelta 每收到一段增量时回调（增量, 累计全文）
  * @param {AbortSignal} signal 外部中止信号（如关闭窗口时 abort）
  */
-async function streamChatCompletion(params, type = 'text', onDelta, signal) {
+async function streamChatCompletion(params, type = 'text', onDelta, signal, label = '') {
   const { baseURL, apiKey, timeoutMs } = getModelConfig(type)
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   const onOuterAbort = () => ctrl.abort()
   signal?.addEventListener('abort', onOuterAbort)
   try {
+    // 调试模式下向流式请求要一份 usage（最终块返回），用于控制台打印 token 用量；
+    // 非调试模式不带该参数，避免个别供应商不支持 stream_options 导致请求失败
+    const body = { ...params, stream: true }
+    if (useSettingsStore().debugMode) body.stream_options = { include_usage: true }
     const res = await fetch(baseURL + '/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`
       },
-      body: JSON.stringify({ ...params, stream: true }),
+      body: JSON.stringify(body),
       signal: ctrl.signal
     })
     if (!res.ok) {
@@ -153,6 +350,7 @@ async function streamChatCompletion(params, type = 'text', onDelta, signal) {
     const decoder = new TextDecoder()
     let buffer = ''
     let full = ''
+    let usage = null
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -166,6 +364,8 @@ async function streamChatCompletion(params, type = 'text', onDelta, signal) {
         if (!data || data === '[DONE]') continue
         let json
         try { json = JSON.parse(data) } catch { continue }
+        // include_usage 的最终块只带 usage（choices 为空），单独收集
+        if (json?.usage) usage = json.usage
         const delta = json?.choices?.[0]?.delta
         const text = typeof delta?.content === 'string' ? delta.content : ''
         if (text) {
@@ -174,7 +374,11 @@ async function streamChatCompletion(params, type = 'text', onDelta, signal) {
         }
       }
     }
+    debugLogAiUsage(label, type, usage)
     return full
+  } catch (error) {
+    debugLogAiError(label, error)
+    throw error
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onOuterAbort)
@@ -227,7 +431,7 @@ export async function generateWordBasicInfo(word, context = '', signal) {
     ],
     response_format: { type: 'json_object' },
     max_tokens: useSettingsStore().basicInfoMaxTokens || 300
-  }), 'text', signal)
+  }), 'text', signal, '单词释义')
 
   return JSON.parse(response.choices[0].message.content)
 }
@@ -238,21 +442,36 @@ export async function generateWordContextTranslation(word, sentence, context) {
   // 兜底：未提供目标句时退回整段上下文
   if (!sentence) sentence = context || ''
 
-  const systemMessage = `你是英语词典助手。我会在用户消息中提供“完整语境”和“目标句”，只翻译目标句。
-翻译规则：
-1. 完整语境仅用于理解背景，禁止翻译或输出其中目标句以外的内容
-2. 必须用 **...** 双星号标记目标单词对应的中文翻译
+  const systemMessage = `你是英语词典助手。我会在用户消息中提供「完整语境」和「目标句」，请说明目标单词在文中（即目标句里）的含义，以及在句中具体起的作用。
+说明规则：
+1. 完整语境与目标句仅用于判断该词在上下文中的具体用法，禁止翻译、复述或输出整句
+2. 必须同时给出两部分，紧接着写、中间用「，」或「；」连接，不要换行、不要分点：
+   【含义】该词在此语境下的中文释义，格式为「词性缩写 + 中文含义」，词性用 n. v. adj. adv. pron. prep. conj. art. int.
+   【作用】用括号补充说明它在句中的指向和成分，按词性给出关键信息：
+   - 代词 pron.：指代前文哪个词/人/物（必须写出被指代的原词），在句中作什么成分
+   - 形容词 adj.：修饰哪个名词/代词（必须写出被修饰的词）
+   - 副词 adv.：修饰哪个动词/形容词/整句
+   - 名词 n.：在句中作什么成分（主语/宾语/表语等），是否承接或指代前文内容
+   - 动词 v.：动作的发出者、承受者，以及时态语态
+   - 介词/连词/冠词/其他：连接哪两个成分，或限定哪个词
+3. 指向说明必须基于目标句和完整语境的实际内容，不能凭空猜测；无法判断时才省略该部分
+4. 若该词在此处的含义与其最常见义不同，在末尾用一句话补充含义来源（如时态、搭配、引申）
+5. 必须用 **...** 双星号标记该词在此处的核心含义
+6. 整体控制在 30 字以内，简洁直白
 返回JSON格式：
 {
-  "contextTranslation": "目标句的完整翻译，目标词用**标记**"
+  "contextTranslation": "【含义】（【作用】），核心含义用**标记**"
 }
 
 示例：
-- 单词 read，完整语境 "Reading is my hobby. I read an interesting book yesterday. It was fun."，目标句 "I read an interesting book yesterday" → {"contextTranslation": "我昨天**读**了一本有趣的书"}`
+- 单词 read，完整语境 "Reading is my hobby. I read an interesting book yesterday. It was fun."，目标句 "I read an interesting book yesterday" → {"contextTranslation": "v. **读**；阅读（过去式，主语是 I，宾语是 an interesting book，指昨天读了一本书）"}
+- 单词 it，目标句 "I read an interesting book yesterday. It was fun." → {"contextTranslation": "pron. **它**（指代前文的 an interesting book，在句中作主语）"}
+- 单词 interesting，目标句 "I read an interesting book yesterday" → {"contextTranslation": "adj. **有趣的**（修饰名词 book，描述这本书令人感兴趣）"}
+- 单词 because，目标句 "I stayed home because it was raining" → {"contextTranslation": "conj. **因为**（连接主句 I stayed home 和原因状语从句 it was raining，引出原因）"}`
 
   const userMessage = context && context !== sentence
-    ? `完整语境（仅供理解背景，不要翻译）：\n"${context}"\n\n目标句（只需翻译这一句）：\n"${sentence}"\n\n请只翻译目标句，并标记单词 "${word}" 对应的中文`
-    : `句子："${sentence}"\n\n请翻译句子并标记单词 "${word}" 对应的中文`
+    ? `完整语境（仅供理解背景，不要翻译）：\n"${context}"\n\n目标句（单词所在的句子）：\n"${sentence}"\n\n请说明单词 "${word}" 在目标句中的含义，以及它在句中指代、修饰或连接的对象，不要翻译句子`
+    : `句子："${sentence}"\n\n请说明单词 "${word}" 在该句中的含义，以及它在句中指代、修饰或连接的对象，不要翻译句子`
 
   const response = await createChatCompletion(chatOptions({
     model,
@@ -262,7 +481,7 @@ export async function generateWordContextTranslation(word, sentence, context) {
     ],
     response_format: { type: 'json_object' },
     max_tokens: useSettingsStore().contextMaxTokens || 200
-  }))
+  }), 'text', undefined, '上下文翻译')
 
   return JSON.parse(response.choices[0].message.content)
 }
@@ -299,7 +518,7 @@ export async function generateSelectionTranslation(selection, context = '') {
     ],
     response_format: { type: 'json_object' },
     max_tokens: useSettingsStore().selectionMaxTokens || 500
-  }))
+  }), 'text', undefined, '划词翻译')
 
   const parsed = parseJsonSafely(response.choices[0].message.content)
   return { translation: String(parsed.translation || '').trim() }
@@ -527,7 +746,7 @@ role 与从句类型的对应（必须遵守）：主语从句→subject，宾�
   // AI 输出具有随机性，校验失败时自动补一次请求，尽量避免让用户手动重试
   let lastError
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await createChatCompletion(params, 'text', signal)
+    const response = await createChatCompletion(params, 'text', signal, '句子成分解析')
     try {
       const parsed = parseJsonSafely(response.choices[0].message.content)
       const segments = (Array.isArray(parsed.segments) ? parsed.segments : [])
@@ -713,7 +932,7 @@ export async function generateAlignedTranslation(text, topSegments, context = ''
   // 与成分解析一致：校验失败自动补一次请求
   let lastError
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await createChatCompletion(params, 'text', signal)
+    const response = await createChatCompletion(params, 'text', signal, '对齐翻译')
     try {
       const parsed = parseJsonSafely(response.choices[0].message.content)
       const raw = Array.isArray(parsed.segments) ? parsed.segments : []
@@ -793,7 +1012,7 @@ export async function chatAboutSelection(history, text, context = '', fullText =
       ...trimmedHistory
     ],
     max_tokens: useSettingsStore().selectionChatMaxTokens || 1000
-  }), 'text', onDelta, signal)
+  }), 'text', onDelta, signal, '划词追问')
 }
 
 /**
@@ -827,37 +1046,249 @@ async function generateWordWithRetry(item, settings, signal) {
   throw lastError
 }
 
-export async function batchGenerateWords(words, onProgress, concurrency, signal) {
+/** 合批单词释义的 system 指令：一次请求处理多词，要求逐个返回且 word 原样回填 */
+const WORD_BATCH_SYSTEM_MESSAGE = `你是英语词典助手。我会给出多个英文单词及它们各自所在的句子，请为每个单词给出释义。返回JSON格式，严格遵守以下规则：
+1. partOfSpeech 必须使用英文缩写：n. v. adj. adv. pron. prep. conj. art. int.（多个词性用"/"连接，如"v./n."）
+2. definitions 最多2个最常用的意思
+3. 必须结合每个单词所在句子，理解其在文中的含义
+4. 必须覆盖我给出的每一个单词，word 字段原样返回
+
+返回格式：
+{
+  "results": [
+    {"word": "单词", "definitions": [{"partOfSpeech": "英文缩写词性", "meaning": "中文释义"}]}
+  ]
+}`
+
+/** 合批单批上限：词数与字符数双限制，避免单批过大导致输出被截断 */
+const WORD_BATCH_MAX_WORDS = 30
+const WORD_BATCH_MAX_CHARS = 2000
+// 合批请求的批间并发缺省值：实际并发优先取调用方传入值，
+// 其次取设置中的「最大并发数」（默认 50），都没有时才用此兜底。
+const WORD_BATCH_CONCURRENCY = 8
+
+/**
+ * 合批生成单词释义：一次请求处理一批单词（每词携带其所在完整句作为语境），
+ * 结果按 word（小写）匹配回填，不依赖数组下标，容错更强。
+ * @param {Array<{word: string, context: string}>} items 同批单词及其语境
+ * @param {AbortSignal} [signal] 外部中止信号
+ * @returns {Promise<Array<{word: string, info?: object, error?: string, success: boolean}>>}
+ */
+async function generateWordBatch(items, signal) {
   const settings = useSettingsStore()
-  if (!concurrency) {
-    concurrency = settings.maxConcurrency || 50
-  }
-  const results = []
-  let completed = 0
-  const total = words.length
+  const model = getModel()
 
-  for (let i = 0; i < total; i += concurrency) {
-    if (signal?.aborted) break
-    const batch = words.slice(i, i + concurrency)
-    const batchResults = await Promise.allSettled(
-      batch.map(async (item) => {
-        const word = typeof item === 'string' ? item : item.word
-        try {
-          const result = await generateWordWithRetry(item, settings, signal)
-          completed++
-          onProgress(completed, total, null)
-          return result
-        } catch (error) {
-          if (signal?.aborted) return { word, error: '已取消', success: false }
-          completed++
-          onProgress(completed, total, error.message)
-          return { word, error: error.message, success: false }
-        }
-      })
+  const lines = items.map((item, i) =>
+    item.context
+      ? `${i + 1}. 单词 "${item.word}"\n   所在句：${item.context}`
+      : `${i + 1}. 单词 "${item.word}"`
+  )
+
+  const response = await createChatCompletion(chatOptions({
+    model,
+    messages: [
+      { role: 'system', content: WORD_BATCH_SYSTEM_MESSAGE },
+      { role: 'user', content: `请为以下 ${items.length} 个单词给出释义：\n${lines.join('\n')}` }
+    ],
+    response_format: { type: 'json_object' },
+    // JSON 数组结构开销大于单对象，按词数放大上限，避免长批输出被截断
+    max_tokens: Math.min(8000, Math.max(500, (settings.basicInfoMaxTokens || 300) * items.length))
+  }), 'text', signal, `单词释义（合批 ${items.length} 词）`)
+
+  const parsed = parseJsonSafely(response.choices[0].message.content)
+  const rawResults = Array.isArray(parsed.results) ? parsed.results : []
+  const definitionsByWord = new Map()
+  for (const raw of rawResults) {
+    const word = String(raw?.word || '').trim().toLowerCase()
+    if (!word || definitionsByWord.has(word)) continue
+    const definitions = Array.isArray(raw?.definitions) ? raw.definitions : []
+    if (definitions.length) definitionsByWord.set(word, definitions)
+  }
+
+  return items.map(item => {
+    const definitions = definitionsByWord.get(item.word.toLowerCase())
+    if (!definitions) {
+      return { word: item.word, error: '未返回释义', success: false }
+    }
+    return { word: item.word, info: { definitions }, success: true }
+  })
+}
+
+/**
+ * 按「词数 + 字符数」双上限，把同语境的单词组顺序打包成多个批次。
+ * 同一句子的词共享语境，句子越长单批容纳的词越少（用户要求句子信息优先）。
+ * @param {Array<{sentence: string, words: string[]}>} groups 同语境单词组（按句子在文中先后排列）
+ * @returns {Array<Array<{word: string, context: string}>>}
+ */
+function packWordBatches(groups) {
+  const batches = []
+  let current = []
+  let currentChars = 0
+  const flush = () => {
+    if (current.length) {
+      batches.push(current)
+      current = []
+      currentChars = 0
+    }
+  }
+  for (const group of groups) {
+    const sentenceChars = group.sentence ? group.sentence.length : 0
+    for (const word of group.words) {
+      const itemChars = word.length + sentenceChars
+      if (current.length && (current.length >= WORD_BATCH_MAX_WORDS || currentChars + itemChars > WORD_BATCH_MAX_CHARS)) {
+        flush()
+      }
+      current.push({ word, context: group.sentence || '' })
+      currentChars += itemChars
+    }
+  }
+  flush()
+  return batches
+}
+
+/**
+ * 处理单个合批批次：整批成功直接返回；批内缺词或整批失败时降级为逐词请求
+ * （复用 generateWordWithRetry 的退避重试），保证「不丢词」。
+ * 约定：每个词的进度回调（report）恰好触发一次；被取消的词不上报（与历史逐词实现一致）。
+ * @param {Array<{word: string, context: string}>} batch
+ * @param {object} settings settings store 实例
+ * @param {(error: string|null) => void} report 单词粒度的进度回调（仅传错误信息）
+ * @param {AbortSignal} [signal]
+ */
+async function runWordBatch(batch, settings, report, signal) {
+  const canceled = () => batch.map(it => ({ word: it.word, error: '已取消', success: false }))
+  if (signal?.aborted) return canceled()
+
+  // 逐词降级：对给定单词并发发起单请求，成功/失败均按词上报进度
+  const retryOneByOne = async (list) => {
+    const settled = await Promise.allSettled(
+      list.map(item => generateWordWithRetry(item, settings, signal))
     )
-    results.push(...batchResults.map(r => r.value || r.reason))
+    return settled.map((r, i) => {
+      const word = list[i].word
+      if (r.status === 'fulfilled') {
+        report(null)
+        return r.value
+      }
+      if (signal?.aborted) return { word, error: '已取消', success: false }
+      report(r.reason?.message)
+      return { word, error: r.reason?.message, success: false }
+    })
   }
 
+  try {
+    const batchResults = await generateWordBatch(batch, signal)
+    if (signal?.aborted) return canceled()
+
+    const results = []
+    const missing = []
+    for (const result of batchResults) {
+      if (result.success) {
+        report(null)
+        results.push(result)
+      } else {
+        missing.push(batch.find(item => item.word === result.word) || { word: result.word, context: '' })
+      }
+    }
+    if (missing.length) {
+      if (settings.debugMode) {
+        console.warn(`[批量生成] 合批响应缺少 ${missing.length} 个词的释义，降级逐词重试`)
+      }
+      results.push(...await retryOneByOne(missing))
+    }
+    return results
+  } catch (error) {
+    if (signal?.aborted) return canceled()
+    if (settings.debugMode) {
+      console.warn(`[批量生成] 合批请求失败，降级逐词重试（${batch.length} 个词）: ${error.message}`)
+    }
+    return await retryOneByOne(batch)
+  }
+}
+
+/**
+ * 批量生成单词释义，两种模式：
+ * - 合批（settings.enableBatchWordRequest 为 true，默认）：同语境的词打包进一次请求
+ * - 逐词（开关关闭）：沿用原有并发逐词请求，行为与历史版本完全一致
+ * 两种模式的进度回调均为「单词」粒度，返回元素结构均为 { word, info } / { word, error }。
+ * @param {Array<string|{word: string, context: string}>} words
+ * @param {(completed: number, total: number, error: string|null) => void} onProgress
+ * @param {number} [concurrency] 逐词模式为请求并发数；合批模式为批间并发数
+ * @param {AbortSignal} [signal]
+ */
+export async function batchGenerateWords(words, onProgress, concurrency, signal) {
+  // 批量多线程生成会并发/分批发出多次请求，调试模式下把整批用量汇总到最后一次性打印
+  return withAiUsageSummary('批量生成单词释义', () =>
+    runBatchGenerateWords(words, onProgress, concurrency, signal)
+  )
+}
+
+async function runBatchGenerateWords(words, onProgress, concurrency, signal) {
+  const settings = useSettingsStore()
+  const items = (words || []).map(item => ({
+    word: typeof item === 'string' ? item : item.word,
+    context: typeof item === 'string' ? '' : (item.context || '')
+  }))
+  const total = items.length
+  let completed = 0
+  const report = (error) => {
+    completed++
+    onProgress(completed, total, error || null)
+  }
+
+  // 逐词模式：与原实现保持一致
+  if (!settings.enableBatchWordRequest) {
+    if (!concurrency) {
+      concurrency = settings.maxConcurrency || 50
+    }
+    const results = []
+    for (let i = 0; i < total; i += concurrency) {
+      if (signal?.aborted) break
+      const batch = items.slice(i, i + concurrency)
+      const batchResults = await Promise.allSettled(
+        batch.map(async (item) => {
+          try {
+            const result = await generateWordWithRetry(item, settings, signal)
+            report(null)
+            return result
+          } catch (error) {
+            if (signal?.aborted) return { word: item.word, error: '已取消', success: false }
+            report(error.message)
+            return { word: item.word, error: error.message, success: false }
+          }
+        })
+      )
+      results.push(...batchResults.map(r => r.value || r.reason))
+    }
+    return results
+  }
+
+  // 合批模式：按语境（完整句子）分组后顺序打包成批
+  const groupMap = new Map()
+  for (const item of items) {
+    const key = item.context || ''
+    if (!groupMap.has(key)) groupMap.set(key, { sentence: key, words: [] })
+    groupMap.get(key).words.push(item.word)
+  }
+  const batches = packWordBatches([...groupMap.values()])
+
+  // 批间并发：不再硬性封顶为 3，改为跟随调用方传入值 / 设置里的「最大并发数」，
+  // 让多个句子所在的批可以同时请求（词多时批次数才会多于并发数，届时按批排队）
+  const batchConcurrency = Math.max(
+    1,
+    Number(concurrency) || settings.maxConcurrency || WORD_BATCH_CONCURRENCY
+  )
+  const results = []
+  for (let i = 0; i < batches.length; i += batchConcurrency) {
+    if (signal?.aborted) break
+    const slice = batches.slice(i, i + batchConcurrency)
+    const settled = await Promise.allSettled(
+      slice.map(batch => runWordBatch(batch, settings, report, signal))
+    )
+    for (const r of settled) {
+      results.push(...(r.status === 'fulfilled' ? r.value : (r.reason || [])))
+    }
+  }
   return results
 }
 
@@ -956,7 +1387,7 @@ export async function generateArticle(words, options = {}) {
       { role: 'user', content: userContent }
     ],
     max_tokens: maxTokens
-  }))
+  }), 'text', undefined, '文章生成')
 
   return response.choices[0].message.content
 }
@@ -998,7 +1429,7 @@ export async function generateArticleMeta(content, options = {}) {
     ],
     response_format: { type: 'json_object' },
     max_tokens: 150
-  }))
+  }), 'text', undefined, '文章标题描述')
 
   const parsed = JSON.parse(response.choices[0].message.content)
   return {
@@ -1035,7 +1466,7 @@ export async function testConnection(type = 'text') {
           ]
         }],
         max_tokens: 10
-      }), type)
+      }), type, undefined, '视觉连通测试')
 
       // content 为空时回退到 reasoning_content（部分思考模型答案被截断到思考字段里）
       const message = response?.choices?.[0]?.message || {}
@@ -1058,7 +1489,7 @@ export async function testConnection(type = 'text') {
       model,
       messages: [{ role: 'user', content: 'Hello' }],
       max_tokens: 10
-    }), type)
+    }), type, undefined, '文本连通测试')
     return { success: true, message: '连接成功' }
   } catch (error) {
     return { success: false, message: error.message }
@@ -1141,7 +1572,7 @@ export async function extractArticleFromImages(imageDataUrls, onProgress) {
     max_tokens: IMAGE_MAX_TOKENS
   }), 'vision', onProgress
     ? (_delta, full) => onProgress(Math.min(budget, estimateTokens(full)), budget)
-    : undefined)
+    : undefined, '图片识别文章')
 
   const parsed = parseJsonSafely(content)
   return {
@@ -1199,7 +1630,7 @@ ${multiImageHint}`
     max_tokens: IMAGE_MAX_TOKENS
   }), 'vision', onProgress
     ? (_delta, full) => onProgress(Math.min(budget, estimateTokens(full)), budget)
-    : undefined)
+    : undefined, '图片识别题目')
 
   const parsed = parseJsonSafely(content)
   return {

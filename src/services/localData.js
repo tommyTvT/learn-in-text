@@ -32,6 +32,38 @@ export function clearLocalDataOwner() {
   }
 }
 
+const OWNERSHIP_PENDING_KEY = 'learn_in_text_ownership_pending'
+
+/**
+ * 标记「本地数据归属决策待定」：登录/注册/邮箱验证成功、但用户尚未在
+ * LocalDataModal 中处理残留数据时写入。存在期间所有后台自动同步被抑制
+ * （autoSync.runSync 检查），防止弹窗未决时残留数据被推给新账号、
+ * 或被误判为「别处已删除」而清掉。决策完成（或取消登录）后清除。
+ */
+export function setOwnershipPending(username) {
+  try {
+    localStorage.setItem(OWNERSHIP_PENDING_KEY, username || '')
+  } catch {
+    // 忽略存储异常
+  }
+}
+
+export function getOwnershipPending() {
+  try {
+    return localStorage.getItem(OWNERSHIP_PENDING_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function clearOwnershipPending() {
+  try {
+    localStorage.removeItem(OWNERSHIP_PENDING_KEY)
+  } catch {
+    // 忽略存储异常
+  }
+}
+
 /** 本地数据概况（登录前的合并决策提示用） */
 export async function getLocalDataStats() {
   const [articles, words, wordMarks] = await Promise.all([

@@ -15,6 +15,46 @@ const TABLE_LABELS = { articles: '文章', words: '单词', word_marks: '标记'
 
 const ts = (v) => (v ? new Date(v).getTime() : 0)
 
+// 增量同步水位（localStorage，按账号隔离）：上次成功同步时，已合并的云端行中
+// 最大的 updatedAt。下次只拉 updatedAt > 水位 的云端行。
+// 已知限制：云端物理删除的行不会出现在增量结果里，改由 update 回读受影响行探测
+// （命中 0 行即判定该行已被别处删除，随即放弃水位重跑全量校准）；
+// 另外云端 updatedAt 由各设备本地时钟写入，时钟偏差大的设备之间理论上可能漏拉。
+const WATERMARK_KEY = 'learn_in_text_sync_watermark'
+
+function readWatermark(username) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WATERMARK_KEY) || 'null')
+    if (raw && raw.username === username && raw.updatedAt) return raw.updatedAt
+  } catch {
+    // 忽略存储异常
+  }
+  return null
+}
+
+function writeWatermark(username, updatedAt) {
+  try {
+    if (updatedAt) localStorage.setItem(WATERMARK_KEY, JSON.stringify({ username, updatedAt }))
+    else localStorage.removeItem(WATERMARK_KEY)
+  } catch {
+    // 忽略存储异常
+  }
+}
+
+/**
+ * 解析「word|本地文章id|occKey」形式的子表快照键，并解析出对应本地单词 id。
+ * 增量补全（快照合成占位行）时用于还原标记/翻译的外键；解析不到返回 null。
+ */
+function parseChildSnapKey(key, localWordByKey) {
+  const parts = key.split('|')
+  const occKey = parts.pop()
+  const articleId = Number(parts.pop())
+  const word = parts.join('|')
+  const lw = localWordByKey.get(`${word}|${articleId}`)
+  if (!lw) return null
+  return { word, articleId, occKey, localWordId: lw.id }
+}
+
 /**
  * 同一业务键在云端存在多行时的防御性选行（历史脏数据），
  * 取 updatedAt（缺省 createdAt）更新的一行作为代表参与差分。
@@ -26,7 +66,9 @@ function betterRep(a, b) {
 function requireUsername() {
   const auth = useAuthStore()
   const name = auth.username?.trim()
-  if (!name) {
+  // 必须同时满足「有用户名」和「有有效会话」：本地身份快照会让 username
+  // 在未登录时也非空，只校验用户名会把未登录状态误判为可同步
+  if (!auth.isLoggedIn || !name) {
     throw new Error('请先登录后再同步')
   }
   return name
@@ -91,6 +133,15 @@ export async function clearCloud() {
     }
   }
 
+  // 云端已清空，必须同时丢弃增量水位与同步快照，两者缺一不可：
+  //   - 只清快照：水位仍在 → 增量拉取拿不到任何行，快照补全会把每条本地记录
+  //     都判成「云端未改动」，云端永久为空，本地数据再也推不回去；
+  //   - 只清水位：全量拉取到空云端，快照里「云端有、本轮不存在」的行会被判成
+  //     「别处已删除」而级联删掉本地数据。
+  // 一并清除后：无快照无水位 → 全量拉取（空云端）→ 本地记录按 push-insert 重新上传。
+  writeWatermark(username, null)
+  await db.syncSnapshots.clear()
+
   return { success: true, message: '云端数据已清除' }
 }
 
@@ -102,18 +153,23 @@ export async function clearCloud() {
  *   - 合并算法会把拉不到的云端记录当作「云端不存在」，
  *     本地记录被重复推送插入，云端数据越堆越多。
  * 因此必须按主键稳定排序 + range 分页循环取全。
+ * 增量：传入 since（上次同步水位）时只取 updatedAt > since 的变更行，
+ * 未变更的行由同步快照补全，不再逐行拉回。
  * 性能：大数据量时逐页串行会累积网络往返延迟，首页探测后改为
  * 每轮并行拉取 4 页（order by id 稳定 + range 互不重叠，可安全并行；
  * 超出总量的 range 返回空数组而非错误）。
  */
-async function fetchAllCloud(supabase, table, username) {
+async function fetchAllCloud(supabase, table, username, since) {
   const PAGE_SIZE = 1000
   const PARALLEL_PAGES = 4
   const fetchPage = async (from) => {
-    const { data, error } = await supabase
+    let query = supabase
       .from(table)
       .select('*')
       .eq('username', username)
+    // 增量：只取上次水位之后有改动的行（since 为空则全量拉取）
+    if (since) query = query.gt('updatedAt', since)
+    const { data, error } = await query
       .order('id', { ascending: true })
       .range(from, from + PAGE_SIZE - 1)
     if (error) throw new Error(`拉取 ${table} 失败: ${error.message}`)
@@ -214,21 +270,35 @@ function decideAction(lTs, cTs, sTs, legacyTomb) {
  * 匹配：稳定业务键（db.js stableKey）。云端记录先经会话内映射
  * （云端文章id->本地文章id、云端单词id->本地单词id）再拼本地视角键。
  * 冲突：比较 updatedAt，新者整条覆盖（Last-Write-Wins）。
- * 删除：本地删除即物理删；同步时「快照有、本地无、云端未动」→ 云端硬删，
- *       「快照有、云端无、本地未动」→ 本地跟删。全部不再产生软删行。
+ * 拉取：默认按水位（上次同步时已合并的云端最大 updatedAt）做
+ *       updatedAt > 水位的增量拉取；未变更的行由同步快照补全（快照保存云端 id），
+ *       无水位（首次/换账号/本地清空/旧快照）时退化为全量拉取。
+ * 删除：本地删除即物理删；同步时「快照有、本地无、云端未动」→ 云端硬删。
+ *       云端物理删除在增量拉取结果里不可见，靠 update 回读受影响行探测：
+ *       命中 0 行说明该云端行已被别处物理删除，此时放弃增量水位并立即重跑一次
+ *       全量同步，让删除补全传播（本地改过→push-insert 复活，本地未动→pull-delete 跟删）。
  * 级联：云端行映射不到本地父记录（文章/单词已删）→ 视为孤儿硬删。
  * 迁移：v7 墓碑机制残留的 tombstones 表在首次新同步时按「本地删除」消化，
  *       云端遗留软删行（deletedAt 非空）统一物理清理。
  */
-export async function syncNow(...args) {
+export async function syncNow(onProgress) {
   if (inflightSync) return inflightSync
-  inflightSync = doSync(...args).finally(() => {
+  inflightSync = (async () => {
+    const first = await doSync(onProgress)
+    // 本次同步探测到云端有行已被其他设备物理删除，而本机快照仍认为它存在
+    // （增量模式看不到物理删除）。此时增量基线已放弃，立即重跑一次全量同步把
+    // 删除传播开，让用户在这次操作内就拿到一致结果。全量后基线恢复正常，不会反复重试。
+    if (!first.needsFullResync) return first
+    // 不传 onProgress：重跑时进度会从 0 重来，进度条倒退反而像故障，
+    // 这里让进度条停在首次同步的终态，只把最终结果返回给调用方。
+    return doSync(undefined, { forceFull: true })
+  })().finally(() => {
     inflightSync = null
   })
   return inflightSync
 }
 
-async function doSync(onProgress) {
+async function doSync(onProgress, opts = {}) {
   const supabase = getSupabase()
   const username = requireUsername()
   const startedAt = Date.now()
@@ -245,28 +315,8 @@ async function doSync(onProgress) {
     })
   }
 
-  // ---- 1. 拉取云端全量（分页取全；四表只读并行，互不依赖） ----
-  // 云端遗留的软删行（v7 机制残留）过滤为「不存在」，其 id 收集后统一物理清理
-  const cloud = {}
-  const staleCloudIds = { articles: [], words: [], word_marks: [], context_translations: [] }
-  const cloudCounts = {}
-  report('正在拉取云端数据…')
-  await Promise.all(
-    TABLES.map(async (table) => {
-      const rows = await fetchAllCloud(supabase, table, username)
-      cloud[table] = rows.filter((r) => {
-        if (r.deletedAt) {
-          staleCloudIds[table].push(r.id)
-          return false
-        }
-        return true
-      })
-      cloudCounts[table] = cloud[table].length
-      report(`正在拉取云端数据…（${Object.keys(cloudCounts).length}/4）`)
-    })
-  )
-
-  // ---- 2. 本地全量 + 同步快照 + 旧墓碑（迁移用），并行读取 ----
+  // ---- 1. 本地全量 + 同步快照 + 旧墓碑（迁移用），并行读取 ----
+  // 先读快照与水位，才能判定本次是增量拉取还是全量拉取。
   const [local, snapshotRows, tombstoneRows] = await Promise.all([
     getLocalFull(),
     db.syncSnapshots.toArray(),
@@ -278,15 +328,44 @@ async function doSync(onProgress) {
     word_marks: local.wordMarks.length,
     context_translations: local.contextTranslations.length
   }
-  // 快照按表分组：Map(key -> 上次同步时的 updatedAt 时间戳)
+  // 快照按表分组：Map(key -> { updatedAt, cloudId })
   const snapshotByTable = new Map()
   for (const row of snapshotRows) {
     if (!snapshotByTable.has(row.table)) snapshotByTable.set(row.table, new Map())
-    snapshotByTable.get(row.table).set(row.key, row.updatedAt)
+    snapshotByTable.get(row.table).set(row.key, { updatedAt: row.updatedAt, cloudId: row.cloudId ?? null })
   }
   const hasSnapshot = snapshotRows.length > 0
   // 旧墓碑键集合（table:key），仅在无快照的首次迁移同步中使用
   const legacyTombKeys = new Set(tombstoneRows.map((t) => `${t.table}:${t.key}`))
+  // 增量拉取前提：快照为本版本格式（每行都带云端 id，可据此补全未变更行）
+  // 且存在当前账号的水位；否则（首次同步 / 旧快照升级 / 换账号 / 本地已清空）全量拉取。
+  // forceFull：上一次同步探测到云端存在「本机快照认为存在、实际已被物理删除」的行，
+  // 需要全量拉取重新校准（全量下的删除传播语义见 decideAction）。
+  const watermark = !opts.forceFull && snapshotRows.length > 0 && snapshotRows.every((r) => r.cloudId != null)
+    ? readWatermark(username)
+    : null
+
+  // ---- 2. 拉取云端（有水位则只取 updatedAt > 水位 的增量行） ----
+  // 未变更的行不在增量结果中，由下方快照补全参与差分；云端物理删除不可见（已知取舍）。
+  // 云端遗留的软删行（v7 机制残留）过滤为「不存在」，其 id 收集后统一物理清理
+  const cloud = {}
+  const staleCloudIds = { articles: [], words: [], word_marks: [], context_translations: [] }
+  const cloudCounts = {}
+  report(watermark ? '正在拉取云端增量…' : '正在拉取云端数据…')
+  await Promise.all(
+    TABLES.map(async (table) => {
+      const rows = await fetchAllCloud(supabase, table, username, watermark)
+      cloud[table] = rows.filter((r) => {
+        if (r.deletedAt) {
+          staleCloudIds[table].push(r.id)
+          return false
+        }
+        return true
+      })
+      cloudCounts[table] = cloud[table].length
+      report(`${watermark ? '正在拉取云端增量…' : '正在拉取云端数据…'}（${Object.keys(cloudCounts).length}/4）`)
+    })
+  )
 
   // 按表细分的同步统计：stats.pushed.articles 等；bump(kind, table) 自增
   const stats = { added: {}, updated: {}, deleted: {}, pushed: {} }
@@ -300,21 +379,41 @@ async function doSync(onProgress) {
     word_marks: { insert: [], update: [], hardDelete: new Set() },
     context_translations: { insert: [], update: [], hardDelete: new Set() }
   }
-  // 本次同步成功后要写入的新快照：Map(table -> Map(key -> finalTs))
+  // 本次同步成功后要写入的新快照：Map(table -> Map(key -> { updatedAt, cloudId }))
+  // cloudId 为对应云端行主键，增量同步时用于补全「云端未改动」的行（更新/删除按 id 直达）
   const nextSnapshot = new Map()
-  const setSnap = (table, key, t) => {
+  const setSnap = (table, key, t, cloudId = null) => {
     if (!nextSnapshot.has(table)) nextSnapshot.set(table, new Map())
-    nextSnapshot.get(table).set(key, t)
+    nextSnapshot.get(table).set(key, { updatedAt: t, cloudId })
+  }
+  // push-insert 的云端 id 在应用阶段才返回，按 snapKey 回填到对应快照行
+  const fillSnapCloudId = (table, key, cloudId) => {
+    if (cloudId == null) return
+    const rec = nextSnapshot.get(table)?.get(key)
+    if (rec) rec.cloudId = cloudId
+  }
+  // 读取快照中某键上次同步时的 updatedAt（时间戳）
+  const snapTs = (snap, key) => {
+    const rec = snap?.get(key)
+    return rec ? rec.updatedAt : null
   }
   // 会话内 id 映射（合并期维护的「本地->云端」反向映射，新插入的在应用期回填）
   const cloudIdOfLocalArticle = new Map() // localArticleId -> cloudArticleId
   const cloudIdOfLocalWord = new Map() // localWordId -> cloudWordId
+  // 增量补全行（快照中「云端未改动且仍存在」的占位记录）与各表补全计数
+  const synthArticleRows = []
+  const synthWordRows = []
+  const synthCounts = { articles: 0, words: 0, word_marks: 0, context_translations: 0 }
 
   // 本地级联删除（同步语义）
   async function deleteLocalArticleCascade(localArticleId) {
-    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, async () => {
+    // 与 db.js 的 articleService.delete 级联范围保持一致：
+    // 划词翻译缓存（selectionTranslations）也挂在文章下，一并清理，
+    // 否则云端删除文章后本地残留孤儿缓存行
+    await db.transaction('rw', db.articles, db.words, db.wordMarks, db.contextTranslations, db.selectionTranslations, async () => {
       await db.wordMarks.where('articleId').equals(localArticleId).delete()
       await db.contextTranslations.where('articleId').equals(localArticleId).delete()
+      await db.selectionTranslations.where('articleId').equals(localArticleId).delete()
       await db.words.where('articleId').equals(localArticleId).delete()
       await db.articles.delete(localArticleId)
     })
@@ -369,6 +468,20 @@ async function doSync(onProgress) {
       if (!prev || betterRep(c, prev)) cloudArticleByUid.set(c.uid, c)
     }
 
+    // 增量补全：快照中存在、本轮未被拉回的 uid → 云端未改动且仍存在，
+    // 用快照的云端 id / updatedAt 合成占位行参与差分（否则会被误判为「云端无」）
+    if (watermark) {
+      for (const [key, rec] of snapshotByTable.get('articles') || []) {
+        if (rec.cloudId == null) continue
+        const uid = key.startsWith('u:') ? key.slice(2) : ''
+        if (!uid || cloudArticleByUid.has(uid)) continue
+        const synth = { id: rec.cloudId, uid, updatedAt: rec.updatedAt, __synth: true }
+        cloudArticleByUid.set(uid, synth)
+        synthArticleRows.push(synth)
+        synthCounts.articles++
+      }
+    }
+
     const snap = snapshotByTable.get('articles')
     const allUids = new Set([...localArticleByUid.keys(), ...cloudArticleByUid.keys()])
     for (const uid of allUids) {
@@ -377,7 +490,7 @@ async function doSync(onProgress) {
       const key = `u:${uid}`
       const lTs = l ? ts(l.updatedAt) : null
       const cTs = c ? ts(c.updatedAt) : null
-      const action = decideAction(lTs, cTs, snap?.get(key), !hasSnapshot && legacyTombKeys.has(`articles:${key}`))
+      const action = decideAction(lTs, cTs, snapTs(snap, key), !hasSnapshot && legacyTombKeys.has(`articles:${key}`))
 
       switch (action) {
         case 'push-update':
@@ -386,20 +499,28 @@ async function doSync(onProgress) {
             patch: { title: l.title, description: l.description || '', content: l.content, sortOrder: l.sortOrder ?? null, updatedAt: l.updatedAt }
           })
           bump('updated', 'articles')
-          setSnap('articles', key, lTs)
+          setSnap('articles', key, lTs, c.id)
           c.__localArticleId = l.id
           cloudIdOfLocalArticle.set(l.id, c.id)
           break
         case 'pull-update':
+          if (c.__synth) {
+            // 增量补全行无字段值，正常不会走到（本地未改动时 lTs==cTs 判为 none）
+            setSnap('articles', key, cTs, c.id)
+            c.__localArticleId = l.id
+            cloudIdOfLocalArticle.set(l.id, c.id)
+            break
+          }
           await db.articles.update(l.id, { title: c.title, description: c.description || '', content: c.content, sortOrder: c.sortOrder ?? null, updatedAt: c.updatedAt })
           bump('updated', 'articles')
-          setSnap('articles', key, cTs)
+          setSnap('articles', key, cTs, c.id)
           c.__localArticleId = l.id
           cloudIdOfLocalArticle.set(l.id, c.id)
           break
         case 'push-insert':
           cloudOps.articles.insert.push({
             localId: l.id,
+            snapKey: key,
             payload: {
               username,
               uid: l.uid,
@@ -416,7 +537,7 @@ async function doSync(onProgress) {
           break
         case 'pull-insert':
           await pullArticleToLocal(c)
-          setSnap('articles', key, cTs)
+          setSnap('articles', key, cTs, c.id)
           break
         case 'push-delete':
           // 云端硬删且不设 id 映射：其子行（单词等）将落入孤儿分支被级联硬删
@@ -429,7 +550,7 @@ async function doSync(onProgress) {
           break
         default:
           // 两边一致：键保留在快照中，维持 id 映射供子表使用
-          setSnap('articles', key, lTs)
+          setSnap('articles', key, lTs, c.id)
           c.__localArticleId = l.id
           cloudIdOfLocalArticle.set(l.id, c.id)
       }
@@ -446,9 +567,9 @@ async function doSync(onProgress) {
   // ==================== 4. 单词合并 ====================
   // 性能：合并写同样包进单个事务（原因见文章合并说明）
   report('正在合并单词…')
-  const cloudWordById = new Map(cloud.words.map((w) => [w.id, w]))
-  // 每个云端单词的本地文章 id（文章阶段已给云端文章记录标 __localArticleId）
-  const cloudArticleById = new Map(cloud.articles.map((c) => [c.id, c]))
+  // 每个云端单词的本地文章 id（文章阶段已给云端文章记录标 __localArticleId；
+  // 增量补全的文章占位行也在其中，故一并纳入映射表）
+  const cloudArticleById = new Map([...cloud.articles, ...synthArticleRows].map((c) => [c.id, c]))
   for (const w of cloud.words) {
     w.__localArticleId = cloudArticleById.get(w.articleId)?.__localArticleId
   }
@@ -470,6 +591,25 @@ async function doSync(onProgress) {
       if (!prev || betterRep(w, prev)) cloudWordByKey.set(k, w)
     }
 
+    // 增量补全：快照中存在、本轮未被拉回的单词（键为 word|本地文章id）
+    if (watermark) {
+      for (const [key, rec] of snapshotByTable.get('words') || []) {
+        if (rec.cloudId == null || cloudWordByKey.has(key)) continue
+        const idx = key.lastIndexOf('|')
+        const synth = {
+          id: rec.cloudId,
+          word: key.slice(0, idx),
+          articleId: null,
+          __localArticleId: Number(key.slice(idx + 1)),
+          updatedAt: rec.updatedAt,
+          __synth: true
+        }
+        cloudWordByKey.set(key, synth)
+        synthWordRows.push(synth)
+        synthCounts.words++
+      }
+    }
+
     const snap = snapshotByTable.get('words')
     const allKeys = new Set([...localWordByKey.keys(), ...cloudWordByKey.keys()])
     for (const key of allKeys) {
@@ -477,7 +617,7 @@ async function doSync(onProgress) {
       const c = cloudWordByKey.get(key)
       const lTs = l ? ts(l.updatedAt) : null
       const cTs = c ? ts(c.updatedAt) : null
-      const action = decideAction(lTs, cTs, snap?.get(key), !hasSnapshot && legacyTombKeys.has(`words:${key}`))
+      const action = decideAction(lTs, cTs, snapTs(snap, key), !hasSnapshot && legacyTombKeys.has(`words:${key}`))
 
       switch (action) {
         case 'push-update':
@@ -486,11 +626,18 @@ async function doSync(onProgress) {
             patch: { definitions: l.definitions || [], examples: l.examples || [], source: l.source || '', updatedAt: l.updatedAt }
           })
           bump('updated', 'words')
-          setSnap('words', key, lTs)
+          setSnap('words', key, lTs, c.id)
           c.__localWordId = l.id
           cloudIdOfLocalWord.set(l.id, c.id)
           break
         case 'pull-update':
+          if (c.__synth) {
+            // 增量补全行无字段值，正常不会走到（本地未改动时 lTs==cTs 判为 none）
+            setSnap('words', key, cTs, c.id)
+            c.__localWordId = l.id
+            cloudIdOfLocalWord.set(l.id, c.id)
+            break
+          }
           await db.words.update(l.id, {
             definitions: c.definitions || [],
             examples: c.examples || [],
@@ -499,13 +646,14 @@ async function doSync(onProgress) {
           })
           l.updatedAt = c.updatedAt
           bump('updated', 'words')
-          setSnap('words', key, cTs)
+          setSnap('words', key, cTs, c.id)
           c.__localWordId = l.id
           cloudIdOfLocalWord.set(l.id, c.id)
           break
         case 'push-insert':
           cloudOps.words.insert.push({
             localId: l.id,
+            snapKey: key,
             localArticleId: l.articleId,
             payload: {
               username,
@@ -535,7 +683,7 @@ async function doSync(onProgress) {
           c.__localWordId = id
           cloudIdOfLocalWord.set(id, c.id)
           bump('added', 'words')
-          setSnap('words', key, cTs)
+          setSnap('words', key, cTs, c.id)
           break
         }
         case 'push-delete':
@@ -550,7 +698,7 @@ async function doSync(onProgress) {
           bump('deleted', 'words')
           break
         default:
-          setSnap('words', key, lTs)
+          setSnap('words', key, lTs, c.id)
           c.__localWordId = l.id
           cloudIdOfLocalWord.set(l.id, c.id)
       }
@@ -565,6 +713,9 @@ async function doSync(onProgress) {
     }
   }
   await db.transaction('rw', db.words, db.wordMarks, db.contextTranslations, mergeWords)
+
+  // 云端单词 id → 记录（含增量补全行；__localWordId / __localArticleId 已在合并期回填）
+  const cloudWordById = new Map([...cloud.words, ...synthWordRows].map((w) => [w.id, w]))
 
   // 单词阶段可能级联删了标记/翻译，重新读取
   let marksNow = await db.wordMarks.toArray()
@@ -612,6 +763,29 @@ async function doSync(onProgress) {
       }
     }
 
+    // 增量补全：快照中存在、本轮未被拉回的标记（键为 word|本地文章id|occKey）。
+    // 本地父记录已不存在 → 本地视为已删除，云端行按孤儿直接硬删。
+    if (watermark) {
+      for (const [key, rec] of snapshotByTable.get('word_marks') || []) {
+        if (rec.cloudId == null || cloudMarkByKey.has(key)) continue
+        const parsed = parseChildSnapKey(key, localWordByKey)
+        if (!parsed) {
+          cloudOps.word_marks.hardDelete.add(rec.cloudId)
+          bump('deleted', 'word_marks')
+          continue
+        }
+        cloudMarkByKey.set(key, {
+          id: rec.cloudId,
+          occKey: parsed.occKey,
+          __localWordId: parsed.localWordId,
+          __localArticleId: parsed.articleId,
+          updatedAt: rec.updatedAt,
+          __synth: true
+        })
+        synthCounts.word_marks++
+      }
+    }
+
     const snap = snapshotByTable.get('word_marks')
     const allKeys = new Set([...localMarkByKey.keys(), ...cloudMarkByKey.keys()])
     for (const key of allKeys) {
@@ -619,19 +793,28 @@ async function doSync(onProgress) {
       const c = cloudMarkByKey.get(key)
       const lTs = l ? ts(l.updatedAt || l.createdAt) : null
       const cTs = c ? ts(c.updatedAt || c.createdAt) : null
-      const action = decideAction(lTs, cTs, snap?.get(key), !hasSnapshot && legacyTombKeys.has(`word_marks:${key}`))
+      const action = decideAction(lTs, cTs, snapTs(snap, key), !hasSnapshot && legacyTombKeys.has(`word_marks:${key}`))
 
       switch (action) {
         case 'push-update':
-          // 标记是「有无」型，两边都存在时新者无字段差异，仅维持快照
-          setSnap('word_marks', key, lTs)
+          // 标记是「有无」型，两边都存在时无字段差异，但本地时间戳较新
+          // （重新标记 = 删旧建新）。仍需把 updatedAt 推到云端对齐，
+          // 否则云端时间戳永久落后，此后每次同步都重复进入该分支
+          cloudOps.word_marks.update.push({
+            id: c.id,
+            patch: { updatedAt: l.updatedAt || l.createdAt }
+          })
+          setSnap('word_marks', key, lTs, c.id)
           break
         case 'pull-update':
-          setSnap('word_marks', key, cTs)
+          // 同理：云端较新时对齐本地行的 updatedAt，避免每次同步重复判定
+          await db.wordMarks.update(l.id, { updatedAt: c.updatedAt || c.createdAt })
+          setSnap('word_marks', key, cTs, c.id)
           break
         case 'push-insert':
           cloudOps.word_marks.insert.push({
             localWordId: l.wordId,
+            snapKey: key,
             localArticleId: l.articleId,
             payload: {
               username,
@@ -654,7 +837,7 @@ async function doSync(onProgress) {
             updatedAt: c.updatedAt || c.createdAt
           })
           bump('added', 'word_marks')
-          setSnap('word_marks', key, cTs)
+          setSnap('word_marks', key, cTs, c.id)
           break
         case 'push-delete':
           cloudOps.word_marks.hardDelete.add(c.id)
@@ -666,7 +849,7 @@ async function doSync(onProgress) {
           bump('deleted', 'word_marks')
           break
         default:
-          setSnap('word_marks', key, lTs)
+          setSnap('word_marks', key, lTs, c.id)
       }
     }
 
@@ -710,6 +893,29 @@ async function doSync(onProgress) {
       }
     }
 
+    // 增量补全：快照中存在、本轮未被拉回的翻译（键为 word|本地文章id|occKey）。
+    // 本地父记录已不存在 → 本地视为已删除，云端行按孤儿直接硬删。
+    if (watermark) {
+      for (const [key, rec] of snapshotByTable.get('context_translations') || []) {
+        if (rec.cloudId == null || cloudTransByKey.has(key)) continue
+        const parsed = parseChildSnapKey(key, localWordByKey)
+        if (!parsed) {
+          cloudOps.context_translations.hardDelete.add(rec.cloudId)
+          bump('deleted', 'context_translations')
+          continue
+        }
+        cloudTransByKey.set(key, {
+          id: rec.cloudId,
+          occKey: parsed.occKey,
+          __localWordId: parsed.localWordId,
+          __localArticleId: parsed.articleId,
+          updatedAt: rec.updatedAt,
+          __synth: true
+        })
+        synthCounts.context_translations++
+      }
+    }
+
     const snap = snapshotByTable.get('context_translations')
     const allKeys = new Set([...localTransByKey.keys(), ...cloudTransByKey.keys()])
     for (const key of allKeys) {
@@ -717,22 +923,28 @@ async function doSync(onProgress) {
       const c = cloudTransByKey.get(key)
       const lTs = l ? ts(l.updatedAt || l.createdAt) : null
       const cTs = c ? ts(c.updatedAt || c.createdAt) : null
-      const action = decideAction(lTs, cTs, snap?.get(key), !hasSnapshot && legacyTombKeys.has(`context_translations:${key}`))
+      const action = decideAction(lTs, cTs, snapTs(snap, key), !hasSnapshot && legacyTombKeys.has(`context_translations:${key}`))
 
       switch (action) {
         case 'push-update':
           cloudOps.context_translations.update.push({ id: c.id, patch: { translation: l.translation, updatedAt: l.updatedAt || l.createdAt } })
           bump('updated', 'context_translations')
-          setSnap('context_translations', key, lTs)
+          setSnap('context_translations', key, lTs, c.id)
           break
         case 'pull-update':
+          if (c.__synth) {
+            // 增量补全行无 translation 字段值，正常不会走到（本地未改动时 lTs==cTs 判为 none）
+            setSnap('context_translations', key, cTs, c.id)
+            break
+          }
           await db.contextTranslations.update(l.id, { translation: c.translation, updatedAt: c.updatedAt || c.createdAt })
           bump('updated', 'context_translations')
-          setSnap('context_translations', key, cTs)
+          setSnap('context_translations', key, cTs, c.id)
           break
         case 'push-insert':
           cloudOps.context_translations.insert.push({
             localWordId: l.wordId,
+            snapKey: key,
             localArticleId: l.articleId,
             payload: {
               username,
@@ -757,7 +969,7 @@ async function doSync(onProgress) {
             updatedAt: c.updatedAt || c.createdAt
           })
           bump('added', 'context_translations')
-          setSnap('context_translations', key, cTs)
+          setSnap('context_translations', key, cTs, c.id)
           break
         case 'push-delete':
           cloudOps.context_translations.hardDelete.add(c.id)
@@ -769,7 +981,7 @@ async function doSync(onProgress) {
           bump('deleted', 'context_translations')
           break
         default:
-          setSnap('context_translations', key, lTs)
+          setSnap('context_translations', key, lTs, c.id)
       }
     }
 
@@ -791,7 +1003,10 @@ async function doSync(onProgress) {
   const insertedArticleIds = new Map() // localId -> cloudId
   if (cloudOps.articles.insert.length) {
     const ids = await batchInsert(supabase, 'articles', cloudOps.articles.insert.map((i) => i.payload))
-    cloudOps.articles.insert.forEach((i, idx) => insertedArticleIds.set(i.localId, ids[idx]))
+    cloudOps.articles.insert.forEach((i, idx) => {
+      insertedArticleIds.set(i.localId, ids[idx])
+      fillSnapCloudId('articles', i.snapKey, ids[idx])
+    })
   }
 
   const insertedWordIds = new Map() // localId -> cloudId
@@ -801,7 +1016,10 @@ async function doSync(onProgress) {
     }
     const validWords = cloudOps.words.insert.filter((i) => i.payload.articleId != null)
     const ids = validWords.length ? await batchInsert(supabase, 'words', validWords.map((i) => i.payload)) : []
-    validWords.forEach((i, idx) => insertedWordIds.set(i.localId, ids[idx]))
+    validWords.forEach((i, idx) => {
+      insertedWordIds.set(i.localId, ids[idx])
+      fillSnapCloudId('words', i.snapKey, ids[idx])
+    })
   }
 
   // 标记/翻译的插入只依赖文章与单词的云端 id，两表互不依赖 → 并行推送
@@ -812,7 +1030,10 @@ async function doSync(onProgress) {
       item.payload.wordId = cloudIdOfLocalWord.get(item.localWordId) ?? insertedWordIds.get(item.localWordId) ?? null
     }
     const valid = cloudOps.word_marks.insert.filter((i) => i.payload.articleId != null && i.payload.wordId != null)
-    if (valid.length) await batchInsert(supabase, 'word_marks', valid.map((i) => i.payload))
+    if (valid.length) {
+      const ids = await batchInsert(supabase, 'word_marks', valid.map((i) => i.payload))
+      valid.forEach((i, idx) => fillSnapCloudId('word_marks', i.snapKey, ids[idx]))
+    }
   }
   const insertTranslations = async () => {
     if (!cloudOps.context_translations.insert.length) return
@@ -821,7 +1042,10 @@ async function doSync(onProgress) {
       item.payload.wordId = cloudIdOfLocalWord.get(item.localWordId) ?? insertedWordIds.get(item.localWordId) ?? null
     }
     const valid = cloudOps.context_translations.insert.filter((i) => i.payload.articleId != null && i.payload.wordId != null)
-    if (valid.length) await batchInsert(supabase, 'context_translations', valid.map((i) => i.payload))
+    if (valid.length) {
+      const ids = await batchInsert(supabase, 'context_translations', valid.map((i) => i.payload))
+      valid.forEach((i, idx) => fillSnapCloudId('context_translations', i.snapKey, ids[idx]))
+    }
   }
   await Promise.all([insertMarks(), insertTranslations()])
 
@@ -830,13 +1054,20 @@ async function doSync(onProgress) {
   // 硬删按 id 集合分批执行，同时清理差分删除与云端遗留的软删行
   report('正在推送更新与删除…')
   const UPDATE_CONCURRENCY = 8
+  // 探测到的「目标云端行已不存在」条数；>0 表示需要一次全量重同步来校准
+  let missingCloudRows = 0
   for (const table of TABLES) {
     const ops = cloudOps[table]
     for (let i = 0; i < ops.update.length; i += UPDATE_CONCURRENCY) {
       const batch = ops.update.slice(i, i + UPDATE_CONCURRENCY)
       await Promise.all(batch.map(async (item) => {
-        const { error } = await supabase.from(table).update(item.patch).eq('id', item.id)
+        // select('id') 回读受影响行：PostgREST 对「匹配 0 行」的 update 不报错，
+        // 不判断就会静默成功。增量模式下被别处物理删除的云端行拉取不到，
+        // 快照补全的占位行又把这条更新判成「云端未改动」，两者叠加会形成僵尸记录：
+        // 本地修改永远推不上去、且毫无提示（仅靠全量重同步才能自愈）。
+        const { data, error } = await supabase.from(table).update(item.patch).eq('id', item.id).select('id')
         if (error) throw new Error(`更新云端 ${table} 失败: ${error.message}`)
+        if (!data || data.length === 0) missingCloudRows++
       }))
     }
     const deleteIds = [...ops.hardDelete, ...staleCloudIds[table]]
@@ -848,18 +1079,44 @@ async function doSync(onProgress) {
   // ---- 9. 全部云端变更成功：重写同步快照 + 清空旧墓碑（一次性迁移） ----
   // 快照失败或前置任一步骤失败时快照保持原状，下次同步基于旧基线重跑（操作幂等）
   report('正在写入同步快照…')
+  // 增量模式：云端记录数 = 本轮拉回的变更行 + 快照补全的未变更行（仅调试展示用）
+  for (const table of TABLES) cloudCounts[table] += synthCounts[table]
   await db.transaction('rw', db.syncSnapshots, db.tombstones, async () => {
     await db.syncSnapshots.clear()
     const rows = []
-    for (const [table, keys] of nextSnapshot) {
-      for (const [key, updatedAt] of keys) {
-        rows.push({ table, key, updatedAt })
+    for (const [table, entries] of nextSnapshot) {
+      for (const [key, rec] of entries) {
+        rows.push({ table, key, updatedAt: rec.updatedAt, cloudId: rec.cloudId ?? null })
       }
     }
     if (rows.length) await db.syncSnapshots.bulkPut(rows)
     // 旧墓碑已在本次差分中消化（无快照的迁移同步按 push-delete 处理），清空退役
     if (tombstoneRows.length) await db.tombstones.clear()
   })
+
+  // 推进增量水位：本次已合并的全部云端行中最大的 updatedAt（不回退）。
+  // 下次只拉 updatedAt > 水位的行；全量同步时以全表最大值重建水位。
+  let maxCloudTs = ts(watermark)
+  for (const table of TABLES) {
+    for (const row of cloud[table]) {
+      const t = ts(row.updatedAt)
+      if (t > maxCloudTs) maxCloudTs = t
+    }
+    // 本次推送/更新到云端的行（updatedAt 已随写入落库）一并纳入水位，
+    // 避免下次同步把自己刚推上去的行再拉一遍
+    for (const item of cloudOps[table].insert) {
+      const t = ts(item.payload.updatedAt)
+      if (t > maxCloudTs) maxCloudTs = t
+    }
+    for (const item of cloudOps[table].update) {
+      const t = ts(item.patch.updatedAt)
+      if (t > maxCloudTs) maxCloudTs = t
+    }
+  }
+  // 探测到云端行缺失时不推进水位（置空 → 下次强制全量），让被别处删除的行在下一轮
+  // 完整差分中收敛：本地改过的行按 push-insert 复活，本地未动的行按 pull-delete 跟删。
+  if (missingCloudRows) writeWatermark(username, null)
+  else writeWatermark(username, maxCloudTs ? new Date(maxCloudTs).toISOString() : null)
 
   // ---- 10. 同步改变了本地数据：刷新内存缓存 ----
   // 词库等页面的数据来自 word/article store 的内存缓存（loaded 标记复用），
@@ -893,12 +1150,19 @@ async function doSync(onProgress) {
     fmt('删除', stats.deleted)
   ].filter(Boolean)
   if (!parts.length) parts.push('数据已一致，无需变动')
+  if (missingCloudRows) {
+    parts.push(`检测到 ${missingCloudRows} 条云端记录已被其他设备删除，已按最新状态重新校准`)
+  }
   return {
     success: true,
     message: '同步完成：' + parts.join('；'),
+    // syncNow 据此决定是否立即再跑一次全量同步（见上方 missingCloudRows 说明）
+    needsFullResync: missingCloudRows > 0,
     // 调试用详细数据（debug 模式在设置页展示）
     detail: {
       durationMs: Date.now() - startedAt,
+      incremental: !!watermark,
+      missingCloudRows,
       cloud: cloudCounts,
       local: localCounts,
       pushed: { ...stats.pushed },

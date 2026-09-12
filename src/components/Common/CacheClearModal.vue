@@ -11,7 +11,7 @@ const emit = defineEmits(['close', 'done'])
 
 const TYPE_OPTIONS = [
   { key: 'words', label: '单词释义', desc: 'AI 生成的单词释义，清除后点击单词时重新生成' },
-  { key: 'contextTranslations', label: '「在文中」翻译', desc: '单词所在句子的语境翻译缓存' },
+  { key: 'contextTranslations', label: '「在文中」释义', desc: '单词在文中实际含义的解释缓存' },
   { key: 'selectionTranslations', label: '划词翻译', desc: '拖选文字的翻译缓存' }
 ]
 
@@ -220,7 +220,7 @@ async function handleClear() {
               v-if="result"
               class="p-3 rounded-md text-sm bg-green-50 dark:bg-neutral-800 text-green-800 dark:text-green-400"
             >
-              清除完成：单词释义 {{ result.words }} 条、「在文中」翻译 {{ result.contextTranslations }} 条、划词翻译 {{ result.selectionTranslations }} 条
+              清除完成：单词释义 {{ result.words }} 条、「在文中」释义 {{ result.contextTranslations }} 条、划词翻译 {{ result.selectionTranslations }} 条
             </div>
             <div
               v-if="error"

@@ -191,21 +191,21 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
         <button
           @click="deleteSelected"
           :disabled="selectedWords.length === 0"
-          class="px-3 py-1 text-sm bg-red-100 dark:bg-neutral-800 text-red-700 dark:text-neutral-300 rounded-md hover:bg-red-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          class="px-3 py-1 text-sm bg-red-100! dark:bg-neutral-800! text-red-700! dark:text-neutral-300! rounded-md hover:bg-red-200! dark:hover:bg-neutral-700! disabled:opacity-50 disabled:cursor-not-allowed"
         >
           删除选中 ({{ selectedWords.length }})
         </button>
         <button
           @click="goToGenerate"
           :disabled="selectedWords.length === 0"
-          class="px-3 py-1 text-sm bg-purple-100 dark:bg-neutral-800 text-purple-700 dark:text-neutral-300 rounded-md hover:bg-purple-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          class="px-3 py-1 text-sm bg-purple-100! dark:bg-neutral-800! text-purple-700! dark:text-neutral-300! rounded-md hover:bg-purple-200! dark:hover:bg-neutral-700! disabled:opacity-50 disabled:cursor-not-allowed"
         >
           AI 生成文章
         </button>
         <button
           @click="exportSelectedTxt"
           :disabled="selectedWords.length === 0"
-          class="px-3 py-1 text-sm bg-orange-100 dark:bg-neutral-800 text-orange-700 dark:text-neutral-300 rounded-md hover:bg-orange-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          class="px-3 py-1 text-sm bg-orange-100! dark:bg-neutral-800! text-orange-700! dark:text-neutral-300! rounded-md hover:bg-orange-200! dark:hover:bg-neutral-700! disabled:opacity-50 disabled:cursor-not-allowed"
         >
           导出选中TXT
         </button>
