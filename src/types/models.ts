@@ -53,6 +53,10 @@ export interface Word {
   /** 词义来源：'common'（内置词表）/ 'ai' / ''（无） */
   source?: string
   phonetic?: string
+  /** 词典原型（本地专属，不参与云同步），如 ran→run */
+  lemma?: string
+  /** 相对原型的词形变化说明（本地专属），如"过去式"/"复数" */
+  wordForm?: string
   updatedAt?: DateLike
 }
 

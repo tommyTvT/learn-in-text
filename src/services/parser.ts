@@ -279,7 +279,7 @@ export function getWordSentenceWithContext(
   word: string,
   occurrence = 0,
   extraSentences = 1
-): { sentence: string; context: string } {
+): { sentence: string; context: string; markedContext: string } {
   const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
   let match: RegExpExecArray | null
   let count = 0
@@ -291,7 +291,7 @@ export function getWordSentenceWithContext(
     }
     count++
   }
-  if (wordIndex < 0) return { sentence: '', context: '' }
+  if (wordIndex < 0) return { sentence: '', context: '', markedContext: '' }
 
   // 共享的带 g 标志正则有 lastIndex 状态，使用前重置
   SENTENCE_BOUNDARY_REGEX.lastIndex = 0
@@ -310,13 +310,32 @@ export function getWordSentenceWithContext(
   }
 
   const targetIdx = sentences.findIndex(s => wordIndex >= s.start && wordIndex < s.end)
-  if (targetIdx < 0) return { sentence: '', context: '' }
+  if (targetIdx < 0) return { sentence: '', context: '', markedContext: '' }
 
   const sentence = sentences[targetIdx].text
   const from = Math.max(0, targetIdx - extraSentences)
   const to = Math.min(sentences.length - 1, targetIdx + extraSentences)
-  const context = sentences.slice(from, to + 1).map(s => s.text).join(' ')
-  return { sentence, context }
+  const contextParts = sentences.slice(from, to + 1).map(s => s.text)
+  const context = contextParts.join(' ')
+
+  // 标记目标词在语境中对应的那次出现（同一词可能重复出现，需用 <w>...</w> 标出用户所选的那一处）
+  const markedParts = contextParts.slice()
+  const target = sentences[targetIdx]
+  const raw = text.slice(target.start, target.end)
+  const trimmed = String(raw).trimStart()
+  const leadingLen = String(raw).length - trimmed.length
+  const innerRegex = new RegExp(`\\b${escapeRegExp(word)}\\b`, 'gi')
+  innerRegex.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = innerRegex.exec(trimmed)) !== null) {
+    if (target.start + leadingLen + m.index === wordIndex) {
+      const rel = targetIdx - from
+      markedParts[rel] = trimmed.slice(0, m.index) + `<w>${m[0]}</w>` + trimmed.slice(m.index + m[0].length)
+      break
+    }
+  }
+
+  return { sentence, context, markedContext: markedParts.join(' ') }
 }
 
 /** 转义正则元字符：词表可能含 ' - 等字符，拼入 \b词\b 前需转义避免正则异常 */

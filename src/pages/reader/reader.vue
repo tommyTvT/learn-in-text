@@ -520,14 +520,19 @@ async function loadWordDetails(word, occKey) {
     const cached = await contextTranslationService.get(wordData.id, articleId.value, occKey).catch(() => null)
     if (requestId !== wordDetailRequestId) return
     wordInfo.value = wordData
-    const cachedTranslation = cached?.translation || null
-    contextTranslation.value = cachedTranslation
-    if (!wordData.definitions?.length) {
-      await generateBasicInfo(word, requestId)
-    }
-    if (!cachedTranslation) {
-      loadContextTranslation(word, occKey, requestId)
-    }
+    contextTranslation.value = cached?.translation || null
+    // 词义与「在文中」同步加载：二者互不依赖（前者只更新 words.definitions，后者只写
+    // contextTranslations），并行发起可让两段内容几乎同时到达；顺序 await 会让上下文
+    // 请求白等一次单词释义请求，弹窗里两段内容一前一后出现。
+    // 注意两点：
+    // 1. wordData 已在此取好并透传，避免两个分支各自 getOrCreate 同一新词并发写库；
+    // 2. 不在这里判断缓存命中，交给 loadContextTranslation 内部复用其自身的缓存查询，
+    //    缓存存在时它直接返回、不发请求。
+    const basicInfoPromise = wordData.definitions?.length
+      ? Promise.resolve()
+      : generateBasicInfo(word, requestId, wordData)
+    loadContextTranslation(word, occKey, requestId, wordData)
+    await basicInfoPromise
   } finally {
     if (requestId === wordDetailRequestId) {
       loadingWord.value = false
@@ -560,7 +565,9 @@ async function toggleMark(part) {
 // requestId：来自 loadWordDetails 的请求序号，用于竞态守卫；未传（弹窗内
 // "点击生成详细释义"按钮）时取发起时刻的当前序号，守卫逻辑一致：
 // AI 生成期间用户切换单词后，词义照常入库（缓存复用），但不覆盖当前弹窗
-async function generateBasicInfo(word, requestId) {
+// wordData：调用方已取好的单词记录（loadWordDetails 与上下文释义并行发起时复用，
+// 避免并发 getOrCreate 同一新词写出重复记录）；未传时自行获取
+async function generateBasicInfo(word, requestId, wordData = null) {
   const rid = requestId ?? wordDetailRequestId
   loadingWord.value = true
   try {
@@ -568,9 +575,11 @@ async function generateBasicInfo(word, requestId) {
     const context = getWordSentenceWithContext(article.value.content, word, 0).sentence
       || getWordContext(article.value.content, word, 50)
     const info = await generateWordBasicInfo(word, context)
-    const wordData = await wordStore.getOrCreateWord(word, articleId.value)
-    await wordStore.updateWord(wordData.id, {
-      definitions: info.definitions || wordData.definitions,
+    const target = wordData || await wordStore.getOrCreateWord(word, articleId.value)
+    await wordStore.updateWord(target.id, {
+      definitions: info.definitions || target.definitions,
+      lemma: info.lemma || target.lemma,
+      wordForm: info.wordForm || target.wordForm,
       source: 'ai'
     })
     if (rid !== wordDetailRequestId) return
@@ -586,29 +595,30 @@ async function generateBasicInfo(word, requestId) {
   }
 }
 
-async function loadContextTranslation(word, occKey, requestId) {
-  const wordData = await wordStore.getOrCreateWord(word, articleId.value)
-  const existing = await contextTranslationService.get(wordData.id, articleId.value, occKey).catch(() => null)
+// wordData 透传同 generateBasicInfo：并行加载时复用调用方已取好的记录，避免重复 getOrCreate
+async function loadContextTranslation(word, occKey, requestId, wordData = null) {
+  const target = wordData || await wordStore.getOrCreateWord(word, articleId.value)
+  const existing = await contextTranslationService.get(target.id, articleId.value, occKey).catch(() => null)
   if (requestId !== wordDetailRequestId) return
   if (existing?.translation) {
     contextTranslation.value = existing.translation
     return
   }
   if (existing) {
-    await contextTranslationService.set(wordData.id, articleId.value, occKey, '')
+    await contextTranslationService.set(target.id, articleId.value, occKey, '')
   }
 
   contextError.value = ''
   loadingContext.value = true
   try {
-    // sentence：目标词所在单句（限定释义范围）；context：前后各多带一句，供 AI 理解语境
-    const { sentence, context } = getWordSentenceWithContext(article.value.content, word, getOccurrence(occKey))
-    const result = await generateWordContextTranslation(word, sentence, context)
+    // context：目标词所在句及前后各一句，供 AI 理解语境；用 <w> 标记本次选中的那次出现（词可能重复出现）
+    const { markedContext } = getWordSentenceWithContext(article.value.content, word, getOccurrence(occKey))
+    const result = await generateWordContextTranslation(word, markedContext)
     if (requestId !== wordDetailRequestId) return
     if (!result.contextTranslation) {
       throw new Error('释义结果为空')
     }
-    await wordStore.updateContextTranslation(wordData.id, articleId.value, occKey, result.contextTranslation)
+    await wordStore.updateContextTranslation(target.id, articleId.value, occKey, result.contextTranslation)
     contextTranslation.value = result.contextTranslation
   } catch (error) {
     console.error('上下文释义生成失败:', error)
@@ -1086,6 +1096,8 @@ async function autoGenerateAllWords() {
         const wordData = await wordStore.getOrCreateWord(result.word, articleId.value)
         await wordStore.updateWord(wordData.id, {
           definitions: result.info.definitions || wordData.definitions,
+          lemma: result.info.lemma || wordData.lemma,
+          wordForm: result.info.wordForm || wordData.wordForm,
           source: 'ai'
         })
       } else {

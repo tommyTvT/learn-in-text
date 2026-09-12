@@ -37,9 +37,6 @@ const isMobile = ref(false)
 let mq = null
 let lastTouchCloseTime = 0
 
-// “在文中”上下文释义默认折叠（后台依旧自动加载），点击标题展开/收起
-const contextExpanded = ref(false)
-
 // 移动端底部弹出/收起动画状态
 const entering = ref(true)   // 进入动画：从下方滑入
 const closing = ref(false)   // 收起动画：向下滑出
@@ -64,6 +61,15 @@ const handleMqChange = (e) => {
 }
 
 const definitions = computed(() => props.wordInfo?.definitions?.slice(0, 2) || [])
+
+// 原型行：仅当 AI 返回了原型且与当前词形不同（存在词形变化）时展示
+const lemmaDisplay = computed(() => {
+  const info = props.wordInfo
+  if (!info?.lemma) return null
+  const current = (props.word || '').toLowerCase()
+  if (info.lemma.toLowerCase() === current) return null
+  return info
+})
 
 // 上下文释义失败原因：优先展示 AI 抛出的可行动消息，非字符串（旧布尔用法）时回退通用文案
 const contextErrorText = computed(() => {
@@ -326,6 +332,10 @@ function handleResize() {
         </button>
       </div>
 
+      <div v-if="lemmaDisplay" class="-mt-1 mb-2 text-xs text-gray-500 dark:text-neutral-400">
+        原型：<span class="font-medium text-gray-700 dark:text-neutral-300">{{ lemmaDisplay.lemma }}</span><span v-if="lemmaDisplay.wordForm && lemmaDisplay.wordForm !== '原形'">（{{ lemmaDisplay.wordForm }}）</span>
+      </div>
+
       <div v-if="loading" class="py-3 text-center">
         <div class="animate-spin inline-block w-5 h-5 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></div>
       </div>
@@ -339,40 +349,24 @@ function handleResize() {
         </div>
 
         <div v-if="loadingContext || contextTranslation || contextError" class="mt-2 pt-2 border-t border-gray-100 dark:border-neutral-800">
-          <button
-            type="button"
-            class="w-full flex items-center gap-1 text-sm sm:text-xs text-gray-500 dark:text-neutral-400"
-            :class="contextExpanded ? 'mb-1' : ''"
-            :aria-expanded="contextExpanded"
-            @click="contextExpanded = !contextExpanded"
-          >
+          <div class="flex items-center gap-1 mb-1 text-sm sm:text-xs text-gray-500 dark:text-neutral-400">
             <span>在文中</span>
-            <svg
-              class="w-3.5 h-3.5 flex-shrink-0 transition-transform duration-200"
-              :class="contextExpanded ? 'rotate-180' : ''"
-              fill="none" stroke="currentColor" viewBox="0 0 24 24"
-            >
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-            </svg>
-            <span v-if="loadingContext && !contextExpanded" class="ml-auto animate-spin inline-block w-3.5 h-3.5 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></span>
-          </button>
-          <div v-show="contextExpanded">
-            <div v-if="loadingContext" class="py-2">
-              <div class="animate-spin inline-block w-4 h-4 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></div>
-            </div>
-            <div v-else-if="contextTranslation" class="text-base sm:text-sm text-gray-700 dark:text-neutral-300">
-              <template v-for="(part, i) in contextTranslation" :key="i">
-                <span v-if="part.highlight" class="text-blue-600 dark:text-blue-400 font-medium">{{ part.text }}</span>
-                <span v-else>{{ part.text }}</span>
-              </template>
-            </div>
-            <div v-else-if="contextError" class="flex items-start gap-2 py-1">
-              <span class="text-xs text-red-500 dark:text-red-400">{{ contextErrorText }}</span>
-              <button
-                @click="$emit('retry-context')"
-                class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
-              >重试</button>
-            </div>
+          </div>
+          <div v-if="loadingContext" class="py-2">
+            <div class="animate-spin inline-block w-4 h-4 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></div>
+          </div>
+          <div v-else-if="contextTranslation" class="text-base sm:text-sm text-gray-700 dark:text-neutral-300">
+            <template v-for="(part, i) in contextTranslation" :key="i">
+              <span v-if="part.highlight" class="text-blue-600 dark:text-blue-400 font-medium">{{ part.text }}</span>
+              <span v-else>{{ part.text }}</span>
+            </template>
+          </div>
+          <div v-else-if="contextError" class="flex items-start gap-2 py-1">
+            <span class="text-xs text-red-500 dark:text-red-400">{{ contextErrorText }}</span>
+            <button
+              @click="$emit('retry-context')"
+              class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
+            >重试</button>
           </div>
         </div>
 

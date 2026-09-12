@@ -536,11 +536,11 @@ export const cacheService = {
       const query = articleIds == null ? db.words : db.words.where('articleId').anyOf(articleIds)
       const records = await query.toArray()
       const now = new Date()
-      const toReset = records.filter(w => w.definitions?.length || w.examples?.length || w.source)
+      const toReset = records.filter(w => w.definitions?.length || w.examples?.length || w.source || w.lemma || w.wordForm)
       if (toReset.length) {
         await db.transaction('rw', db.words, async () => {
           await Promise.all(toReset.map(w =>
-            db.words.update(w.id!, { definitions: [], examples: [], source: '', updatedAt: now })
+            db.words.update(w.id!, { definitions: [], examples: [], source: '', lemma: '', wordForm: '', updatedAt: now })
           ))
         })
       }
