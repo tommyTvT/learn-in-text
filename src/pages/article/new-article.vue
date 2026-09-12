@@ -5,6 +5,8 @@ import PageLayout from '../../components/Common/PageLayout.vue'
 import { useArticleStore } from '../../stores/article'
 import ImageImportModal from '../../components/AI/ImageImportModal.vue'
 import { alert, confirmDialog } from '../../services/dialog'
+import { toast } from '../../services/toast'
+import { errorText } from '../../services/errors'
 
 usePageRoute()
 const router = useRouter()
@@ -13,18 +15,29 @@ const newArticleTitle = ref('')
 const newArticleDescription = ref('')
 const newArticleContent = ref('')
 const showImageModal = ref(false)
+// 提交中标记：createArticle 没有幂等保护，快速双击/连点会创建两篇重复文章
+const saving = ref(false)
 
 async function createArticle() {
+  if (saving.value) return
   if (!newArticleTitle.value.trim() || !newArticleContent.value.trim()) {
     await alert('请输入标题和内容')
     return
   }
-  const article = await articleStore.createArticle({
-    title: newArticleTitle.value.trim(),
-    description: newArticleDescription.value.trim(),
-    content: newArticleContent.value.trim()
-  })
-  router.push(`/reader/${article.id}`)
+  saving.value = true
+  try {
+    const article = await articleStore.createArticle({
+      title: newArticleTitle.value.trim(),
+      description: newArticleDescription.value.trim(),
+      content: newArticleContent.value.trim()
+    })
+    await toast('文章已创建')
+    router.push(`/reader/${article.id}`)
+  } catch (e) {
+    await toast(errorText(e, '创建失败，请重试'), 'error')
+  } finally {
+    saving.value = false
+  }
 }
 
 // 图片识别完成：回填表单
@@ -51,9 +64,10 @@ function handleExtracted(payload) {
       <h1 class="text-xl font-bold text-gray-900 dark:text-neutral-100">新建文章</h1>
       <button
         @click="createArticle"
-        class="ml-auto bg-blue-600 text-white px-6 py-2 rounded-md font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-black transition-colors"
+        :disabled="saving"
+        class="ml-auto bg-blue-600 text-white px-6 py-2 rounded-md font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
-        开始学习
+        {{ saving ? '创建中...' : '开始学习' }}
       </button>
     </div>
 

@@ -8,6 +8,7 @@ import { handleEmailConfirmation, readableError } from '../../services/auth'
 import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner, setOwnershipPending, clearOwnershipPending } from '../../services/localData'
 import { pauseAutoSync, resumeAutoSync, syncAfterLogin } from '../../services/autoSync'
 import LocalDataModal from '../../components/Common/LocalDataModal.vue'
+import ULink from '../../components/Common/ULink.vue'
 import { LoaderCircle, CheckCircle2, XCircle } from 'lucide-vue-next'
 
 const auth = useAuthStore()
@@ -100,7 +101,10 @@ function onLocalDataCancel() {
   showLocalDataModal.value = false
   clearOwnershipPending()
   resumeAutoSync()
-  // 已取消登录（登出），停在验证结果页
+  // 「取消登录」已在弹窗内执行登出，此时停留在本页没有任何入口
+  // （success 分支只有图标与文案，页面为 bare 布局无顶栏/标签栏），
+  // 必须主动送回登录页，否则用户被卡死在这里。
+  router.replace('/login')
 }
 </script>
 
@@ -127,12 +131,12 @@ function onLocalDataCancel() {
           <XCircle class="w-14 h-14 mx-auto text-red-500" />
           <h1 class="mt-4 text-lg font-bold text-gray-900 dark:text-neutral-100">邮箱验证未完成</h1>
           <p class="mt-2 text-sm text-gray-500 dark:text-neutral-400">{{ message }}</p>
-          <router-link
+          <ULink
             to="/login"
             class="mt-6 inline-block px-6 py-2.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-medium hover:from-blue-700 hover:to-indigo-700 transition-all cursor-pointer"
           >
             去登录
-          </router-link>
+          </ULink>
         </div>
       </div>
     </div>

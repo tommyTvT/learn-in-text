@@ -1,11 +1,14 @@
 import { useSettingsStore, PRESET_PROVIDERS } from '../stores/settings'
 
+/** 模型类型：文本 / 视觉 */
+type ChatModelType = 'text' | 'vision'
+
 /**
  * 根据模型类型（text / vision）解析对应的供应商与模型配置。
  * - 文本：使用 textModelConfig 的供应商与模型
  * - 视觉：优先使用 visionModelConfig；未配置有效供应商时回退到文本模型（共用供应商）
  */
-function getModelConfig(type = 'text') {
+function getModelConfig(type: ChatModelType = 'text') {
   const settings = useSettingsStore()
   let config = type === 'vision' ? settings.visionModelConfig : settings.textModelConfig
   const hasProvider = settings.providers.some(p => p.id === config?.providerId)
@@ -24,11 +27,11 @@ function getModelConfig(type = 'text') {
   }
 }
 
-function getModel(type = 'text') {
+function getModel(type: ChatModelType = 'text') {
   return getModelConfig(type).model
 }
 
-function chatOptions(options) {
+function chatOptions(options: any) {
   return {
     ...options,
     thinking: { type: 'disabled' }
@@ -39,7 +42,7 @@ function chatOptions(options) {
 // 固定文本降低随机性与 token 开销，避免随机码带来的识别歧义。
 const VISION_TEST_TEXT = '123'
 
-function makeTestImage() {
+function makeTestImage(): string {
   const canvas = document.createElement('canvas')
   canvas.width = 300
   canvas.height = 120
@@ -58,14 +61,22 @@ function makeTestImage() {
 }
 
 /** 判断请求体里是否携带了图片（image_url）内容 */
-function hasImageContent(body) {
-  return (body?.messages || []).some(m =>
-    Array.isArray(m.content) && m.content.some(part => part?.type === 'image_url')
+function hasImageContent(body: any): boolean {
+  return (body?.messages || []).some((m: any) =>
+    Array.isArray(m.content) && m.content.some((part: any) => part?.type === 'image_url')
   )
 }
 
 /** 基于 fetch 的 OpenAI 兼容客户端，替代体积较大的 openai SDK */
-async function request(path, { baseURL, apiKey, body, timeoutMs, signal }) {
+interface ChatRequestOptions {
+  baseURL: string
+  apiKey: string
+  body: any
+  timeoutMs: number
+  signal?: AbortSignal
+}
+
+async function request(path: string, { baseURL, apiKey, body, timeoutMs, signal }: ChatRequestOptions) {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   const onOuterAbort = () => ctrl.abort()
@@ -106,7 +117,7 @@ async function request(path, { baseURL, apiKey, body, timeoutMs, signal }) {
  * @param {object} usage 接口返回的 usage 字段
  * @returns {{prompt: number, completion: number, total: number, cached: number, miss: number}|null}
  */
-function readUsage(usage) {
+function readUsage(usage: any) {
   if (!usage || typeof usage !== 'object') return null
   const prompt = Number(usage.prompt_tokens) || 0
   const completion = Number(usage.completion_tokens) || 0
@@ -134,31 +145,31 @@ const PEAK_WINDOWS = [
  * 不依赖运行设备时区，保证跨时区计算结果一致。
  * @returns {{day: number, minutes: number}} day：0=周日 … 6=周六
  */
-function beijingClock(at) {
+function beijingClock(at: number) {
   const d = new Date(at + 8 * 60 * 60 * 1000)
   return { day: d.getUTCDay(), minutes: d.getUTCHours() * 60 + d.getUTCMinutes() }
 }
 
 /** 判断某时刻是否处于空闲时段（高峰：北京时间周一至周五 9:00–12:00、14:00–18:00） */
-function isOffPeak(at = Date.now()) {
+function isOffPeak(at: number = Date.now()): boolean {
   const { day, minutes } = beijingClock(at)
   if (day === 0 || day === 6) return true // 周末全天空闲
   return !PEAK_WINDOWS.some(([start, end]) => minutes >= start && minutes < end)
 }
 
 /** 金额格式化（元）：最多 6 位小数并去掉末尾多余的 0 */
-function formatMoney(yuan) {
+function formatMoney(yuan: number): string {
   if (!(yuan > 0)) return '0 元'
   return `${Number(yuan.toFixed(6))} 元`
 }
 
 /** 功能名归一化：去掉「（合批 20 词）」这类参数后缀，便于分组统计 */
-function usageGroupLabel(label) {
+function usageGroupLabel(label: string): string {
   return (label || 'AI 请求').replace(/（.*$/, '')
 }
 
 /** 按单价计算一条用量的费用明细（元）：输入命中 / 输入未命中 / 输出 */
-function usageCost(u, price) {
+function usageCost(u: any, price: any) {
   return {
     cached: (u.cached * price.cached) / 1e6,
     miss: (u.miss * price.miss) / 1e6,
@@ -168,7 +179,7 @@ function usageCost(u, price) {
 
 // 当前活跃的批量用量收集器：批量多线程生成时逐条打印会刷屏，
 // 改为批次内静默累加，批次结束时由 withAiUsageSummary 一次性汇总输出。
-let usageBatch = null
+let usageBatch: { items: any[]; errors: string[]; start: number; label: string } | null = null
 
 /**
  * 调试模式下的 AI token 用量输出。
@@ -178,7 +189,7 @@ let usageBatch = null
  * @param {string} type 模型类型（text / vision）
  * @param {object} usage 接口返回的 usage 字段
  */
-function debugLogAiUsage(label, type, usage) {
+function debugLogAiUsage(label: string, type: string, usage: any): void {
   if (!useSettingsStore().debugMode) return
   const u = readUsage(usage)
   if (!u) return
@@ -199,7 +210,7 @@ function debugLogAiUsage(label, type, usage) {
 }
 
 /** 调试模式下的 AI 请求失败输出；批量场景只记录，随汇总一并打印 */
-function debugLogAiError(label, error) {
+function debugLogAiError(label: string, error: any): void {
   if (!useSettingsStore().debugMode) return
   const message = `${usageGroupLabel(label)}失败: ${error?.message || error}`
   if (usageBatch) {
@@ -217,7 +228,7 @@ function debugLogAiError(label, error) {
  * @param {string} label 批次名（如「批量生成单词释义」）
  * @param {() => Promise<any>} fn 批次逻辑
  */
-export async function withAiUsageSummary(label, fn) {
+export async function withAiUsageSummary(label: string, fn: () => Promise<any>): Promise<any> {
   if (!useSettingsStore().debugMode) return fn()
   const prev = usageBatch
   const batch = { label, items: [], errors: [], start: Date.now() }
@@ -231,10 +242,10 @@ export async function withAiUsageSummary(label, fn) {
 }
 
 /** 汇总打印批次用量与费用 */
-function printUsageBatchSummary(batch) {
+function printUsageBatchSummary(batch: any): void {
   if (!batch.items.length && !batch.errors.length) return
-  const groups = new Map()
-  const totals = { prompt: 0, completion: 0, total: 0, cached: 0, miss: 0 }
+  const groups = new Map<string, any>()
+  const totals: Record<string, number> = { prompt: 0, completion: 0, total: 0, cached: 0, miss: 0 }
   const cost = {
     offPeak: { cached: 0, miss: 0, output: 0 },
     peak: { cached: 0, miss: 0, output: 0 }
@@ -259,10 +270,10 @@ function printUsageBatchSummary(batch) {
     bucket.output += c.output
   }
 
-  const sumCost = (b) => b.cached + b.miss + b.output
+  const sumCost = (b: any): number => b.cached + b.miss + b.output
   const hitPct = totals.prompt ? Math.round((totals.cached / totals.prompt) * 100) : 0
   const duration = ((Date.now() - batch.start) / 1000).toFixed(1)
-  const costLine = (name, b) =>
+  const costLine = (name: string, b: any): string =>
     `费用（${name}时段）：缓存命中 ${formatMoney(b.cached)} + 未命中 ${formatMoney(b.miss)} + 输出 ${formatMoney(b.output)} = ${formatMoney(sumCost(b))}`
 
   console.group(
@@ -285,7 +296,7 @@ function printUsageBatchSummary(batch) {
   console.groupEnd()
 }
 
-async function createChatCompletion(params, type = 'text', signal, label = '') {
+async function createChatCompletion(params: any, type: ChatModelType = 'text', signal?: AbortSignal, label = '') {
   const { baseURL, apiKey, timeoutMs } = getModelConfig(type)
   try {
     const res = await request('/chat/completions', { baseURL, apiKey, body: params, timeoutMs, signal })
@@ -298,7 +309,7 @@ async function createChatCompletion(params, type = 'text', signal, label = '') {
 }
 
 /** 估算文本 token 数（粗略近似，仅用于进度条）：英文约 4 字符/token，中文约 1 字符/token */
-function estimateTokens(text) {
+function estimateTokens(text: string): number {
   if (!text) return 0
   const cjk = (text.match(/[\u4e00-\u9fa5]/g) || []).length
   const other = text.length - cjk
@@ -312,7 +323,13 @@ function estimateTokens(text) {
  * @param {(delta: string, full: string) => void} onDelta 每收到一段增量时回调（增量, 累计全文）
  * @param {AbortSignal} signal 外部中止信号（如关闭窗口时 abort）
  */
-async function streamChatCompletion(params, type = 'text', onDelta, signal, label = '') {
+async function streamChatCompletion(
+  params: any,
+  type: ChatModelType = 'text',
+  onDelta?: (delta: string, full?: string) => void,
+  signal?: AbortSignal,
+  label = ''
+) {
   const { baseURL, apiKey, timeoutMs } = getModelConfig(type)
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
@@ -385,7 +402,7 @@ async function streamChatCompletion(params, type = 'text', onDelta, signal, labe
   }
 }
 
-async function listModelsForProvider(provider) {
+async function listModelsForProvider(provider: any) {
   const settings = useSettingsStore()
   const baseURL = provider.endpoint.replace(/\/+$/, '')
   const timeoutMs = (settings.requestTimeout || 30) * 1000
@@ -404,7 +421,7 @@ async function listModelsForProvider(provider) {
   }
 }
 
-export async function generateWordBasicInfo(word, context = '', signal) {
+export async function generateWordBasicInfo(word: string, context = '', signal?: AbortSignal) {
   const model = getModel()
 
   const systemMessage = `你是英语词典助手。返回JSON格式，严格遵守以下规则：
@@ -436,7 +453,7 @@ export async function generateWordBasicInfo(word, context = '', signal) {
   return JSON.parse(response.choices[0].message.content)
 }
 
-export async function generateWordContextTranslation(word, sentence, context) {
+export async function generateWordContextTranslation(word: string, sentence: string, context: string) {
   const model = getModel()
 
   // 兜底：未提供目标句时退回整段上下文
@@ -493,7 +510,7 @@ export async function generateWordContextTranslation(word, sentence, context) {
  * @param {string} context 选中文本所在语境（可为空）
  * @returns {Promise<{translation: string}>}
  */
-export async function generateSelectionTranslation(selection, context = '') {
+export async function generateSelectionTranslation(selection: string, context = '') {
   const model = getModel()
 
   const systemMessage = `你是英语翻译助手。我会在用户消息中提供“完整语境”和“待翻译文本”，只翻译待翻译文本。
@@ -528,14 +545,14 @@ export async function generateSelectionTranslation(selection, context = '') {
 const COMPONENT_ROLES = ['subject', 'predicate', 'object', 'attributive', 'adverbial', 'complement', 'predicative', 'conjunction']
 
 /** 从句大类 → 合法子类枚举（与前端 grammarConstants 的 CLAUSE_SUBTYPE_LABELS 对应） */
-const CLAUSE_SUBTYPES = {
+const CLAUSE_SUBTYPES: Record<string, string[]> = {
   noun: ['subject_clause', 'object_clause', 'predicative_clause', 'appositive_clause'],
   relative: ['restrictive', 'non_restrictive'],
   adverbial: ['time', 'place', 'reason', 'condition', 'concession', 'purpose', 'result', 'manner', 'comparison']
 }
 
 /** 名词性从句子类 → 在主句中充当的成分（用于校正 AI 标注） */
-const NOUN_CLAUSE_ROLES = {
+const NOUN_CLAUSE_ROLES: Record<string, string> = {
   subject_clause: 'subject',
   object_clause: 'object',
   predicative_clause: 'predicative',
@@ -549,7 +566,7 @@ const MAX_CLAUSE_DEPTH = 3
  * 校验用文本归一化：去除全部空白（AI 可能把空格归入不同片段），
  * 并统一常见排版引号/撇号，避免 AI 转换引号样式导致还原校验误判
  */
-function normalizeForCompare(text) {
+function normalizeForCompare(text: string): string {
   return String(text || '')
     .replace(/\s+/g, '')
     .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
@@ -565,12 +582,12 @@ function normalizeForCompare(text) {
  * @param {number} depth 当前嵌套深度（顶层为 0）
  * @returns {{text: string, role: string, clause?: {type: string, subtype: string, segments: Array}}|null}
  */
-function normalizeSegment(raw, depth = 0) {
+function normalizeSegment(raw: any, depth: number = 0): any {
   if (!raw || typeof raw !== 'object') return null
   const text = String(raw.text ?? '')
   if (!text) return null
   const role = COMPONENT_ROLES.includes(raw.role) ? raw.role : 'none'
-  const node = { text, role }
+  const node: any = { text, role }
 
   const clause = raw.clause
   if (clause && typeof clause === 'object' && depth < MAX_CLAUSE_DEPTH) {
@@ -580,10 +597,10 @@ function normalizeSegment(raw, depth = 0) {
     if (type) {
       const subtype = CLAUSE_SUBTYPES[type].includes(clause.subtype) ? clause.subtype : ''
       const children = (Array.isArray(clause.segments) ? clause.segments : [])
-        .map(s => normalizeSegment(s, depth + 1))
+        .map((s: any) => normalizeSegment(s, depth + 1))
         .filter(Boolean)
       // 从句内部拼接须还原从句原文，否则视为不可靠结构，降级为普通片段
-      const joined = normalizeForCompare(children.map(c => c.text).join(''))
+      const joined = normalizeForCompare(children.map((c: any) => c.text).join(''))
       if (children.length && joined && joined === normalizeForCompare(text)) {
         node.clause = { type, subtype, segments: children }
         // 校正从句在主句中的角色：定语/状语从句固定，名词性从句按子类推导
@@ -607,9 +624,9 @@ function normalizeSegment(raw, depth = 0) {
  * @param {Array<{text: string, role: string}>} segments 顶层片段
  * @returns {Array<{text: string, role: string}>} 剥离后的片段（浅拷贝，不改入参）
  */
-function stripWrapperSegments(segments) {
+function stripWrapperSegments(segments: any[]): any[] {
   const list = [...segments]
-  const isWrapper = s => s.role === 'none' && /^[\s"'‘’“”‛″#*`~]{1,3}$/.test(s.text)
+  const isWrapper = (s: any): boolean => s.role === 'none' && /^[\s"'‘’“”‛″#*`~]{1,3}$/.test(s.text)
   while (list.length && isWrapper(list[0])) list.shift()
   while (list.length && isWrapper(list[list.length - 1])) list.pop()
   return list
@@ -619,15 +636,15 @@ function stripWrapperSegments(segments) {
  * 句子成分解析的会话级内存缓存（简易 LRU）：
  * 阅读时反复选中同一段文本（含相同语境）直接复用历史解析结果，避免重复 AI 请求。
  */
-const componentParseCache = new Map()
+const componentParseCache = new Map<string, any>()
 const COMPONENT_CACHE_MAX = 50
 
-function componentCacheKey(text, context) {
+function componentCacheKey(text: string, context: string): string {
   return text + '|||' + (context || '')
 }
 
 /** LRU 读：命中后移到 Map 尾部（最近使用）；深拷贝返回，避免调用方改动影响缓存 */
-function componentCacheGet(key) {
+function componentCacheGet(key: string): any {
   if (!componentParseCache.has(key)) return undefined
   const value = componentParseCache.get(key)
   componentParseCache.delete(key)
@@ -636,9 +653,9 @@ function componentCacheGet(key) {
 }
 
 /** LRU 写：达到上限时淘汰 Map 首个条目（最久未使用）；存入深拷贝，保持缓存数据不被外部改动污染 */
-function componentCacheSet(key, value) {
+function componentCacheSet(key: string, value: any): void {
   if (componentParseCache.size >= COMPONENT_CACHE_MAX) {
-    componentParseCache.delete(componentParseCache.keys().next().value)
+    componentParseCache.delete(componentParseCache.keys().next().value!)
   }
   componentParseCache.set(key, structuredClone(value))
 }
@@ -651,7 +668,7 @@ function componentCacheSet(key, value) {
  * @param {AbortSignal} signal 外部中止信号（关闭窗口时 abort）
  * @returns {Promise<{segments: Array<{text: string, role: string, clause?: object}>}>} 按原文顺序的成分片段（可嵌套从句）
  */
-export async function parseSelectionComponents(text, context = '', signal) {
+export async function parseSelectionComponents(text: string, context = '', signal?: AbortSignal) {
   // 命中缓存：同文本+语境直接复用历史解析结果
   const cacheKey = componentCacheKey(text, context)
   const cached = componentCacheGet(cacheKey)
@@ -750,7 +767,7 @@ role 与从句类型的对应（必须遵守）：主语从句→subject，宾�
     try {
       const parsed = parseJsonSafely(response.choices[0].message.content)
       const segments = (Array.isArray(parsed.segments) ? parsed.segments : [])
-        .map(s => normalizeSegment(s, 0))
+        .map((s: any) => normalizeSegment(s, 0))
         .filter(Boolean)
       if (!segments.length) {
         throw new Error('解析结果为空')
@@ -758,11 +775,11 @@ role 与从句类型的对应（必须遵守）：主语从句→subject，宾�
       // 顶层拼接须还原原文（忽略空白与引号样式差异）；不一致时先剥离首尾包裹符片段复检，
       // 仍不一致才视为本次解析失败（先严格后剥离，避免误伤原文本身以引号开头的合法切分）
       let finalSegments = segments
-      if (normalizeForCompare(finalSegments.map(s => s.text).join('')) !== normalizeForCompare(text)) {
+      if (normalizeForCompare(finalSegments.map((s: any) => s.text).join('')) !== normalizeForCompare(text)) {
         const stripped = stripWrapperSegments(finalSegments)
         if (
           !stripped.length ||
-          normalizeForCompare(stripped.map(s => s.text).join('')) !== normalizeForCompare(text)
+          normalizeForCompare(stripped.map((s: any) => s.text).join('')) !== normalizeForCompare(text)
         ) {
           throw new Error('解析结果与原文不一致')
         }
@@ -780,7 +797,7 @@ role 与从句类型的对应（必须遵守）：主语从句→subject，宾�
 }
 
 /** 成分角色 → 中文说明（对齐翻译 prompt 中展示切分结果用） */
-const ROLE_PROMPT_LABELS = {
+const ROLE_PROMPT_LABELS: Record<string, string> = {
   subject: '主语',
   predicate: '谓语',
   object: '宾语',
@@ -793,7 +810,7 @@ const ROLE_PROMPT_LABELS = {
 }
 
 /** 从句大类 → 中文说明（标注从句整体片段用） */
-const CLAUSE_PROMPT_LABELS = {
+const CLAUSE_PROMPT_LABELS: Record<string, string> = {
   noun: '名词性从句',
   relative: '定语从句',
   adverbial: '状语从句'
@@ -803,11 +820,11 @@ const CLAUSE_PROMPT_LABELS = {
 const alignedTranslationCache = new Map()
 const ALIGNED_CACHE_MAX = 50
 
-function alignedCacheKey(text, context, topSegments) {
+function alignedCacheKey(text: string, context: string, topSegments: any[]): string {
   return text + '|||' + (context || '') + '|||' + topSegments.map(s => s.text).join('\u0001')
 }
 
-function alignedCacheGet(key) {
+function alignedCacheGet(key: string): any {
   if (!alignedTranslationCache.has(key)) return undefined
   const value = alignedTranslationCache.get(key)
   alignedTranslationCache.delete(key)
@@ -815,7 +832,7 @@ function alignedCacheGet(key) {
   return structuredClone(value)
 }
 
-function alignedCacheSet(key, value) {
+function alignedCacheSet(key: string, value: any): void {
   if (alignedTranslationCache.size >= ALIGNED_CACHE_MAX) {
     alignedTranslationCache.delete(alignedTranslationCache.keys().next().value)
   }
@@ -830,16 +847,16 @@ function alignedCacheSet(key, value) {
  * @param {Array} clauseSegments 从句内部片段（parseSelectionComponents 的解析结果）
  * @returns {Array<{enIndex: number, zh: string, children?: Array}>|null}
  */
-function normalizeAlignedChildren(rawChildren, clauseSegments) {
+function normalizeAlignedChildren(rawChildren: any, clauseSegments: any[]): any[] | null {
   if (!Array.isArray(rawChildren) || !clauseSegments?.length) return null
-  const out = []
-  const seen = new Set()
+  const out: any[] = []
+  const seen = new Set<number>()
   for (const item of rawChildren) {
     const enIndex = Number(item?.enIndex)
     if (!Number.isInteger(enIndex) || enIndex < 0 || enIndex >= clauseSegments.length) return null
     if (seen.has(enIndex)) return null
     seen.add(enIndex)
-    const entry = { enIndex, zh: String(item?.zh ?? '').trim() }
+    const entry: any = { enIndex, zh: String(item?.zh ?? '').trim() }
     const clauseSeg = clauseSegments[enIndex]
     if (clauseSeg?.clause) {
       const children = normalizeAlignedChildren(item?.children, clauseSeg.clause.segments)
@@ -861,7 +878,7 @@ function normalizeAlignedChildren(rawChildren, clauseSegments) {
  * @param {AbortSignal} signal 外部中止信号（关闭窗口时 abort）
  * @returns {Promise<{segments: Array<{enIndex: number, zh: string, children?: Array}>}>} 按中文语序排列的对应片段（enIndex 指向 topSegments 下标；children 的 enIndex 指向从句内部片段下标）
  */
-export async function generateAlignedTranslation(text, topSegments, context = '', signal) {
+export async function generateAlignedTranslation(text: string, topSegments: any[], context = '', signal?: AbortSignal) {
   const segs = (topSegments || []).filter(s => s && s.text)
   if (!text || !segs.length) return { segments: [] }
 
@@ -898,8 +915,8 @@ export async function generateAlignedTranslation(text, topSegments, context = ''
   { "enIndex": 4, "zh": "。" } ] }`
 
   // 递归列出切分结果：顶层编号 i，从句内部编号 i.j（嵌套类推 i.j.k）
-  const listSegments = (list, prefix) =>
-    (list || []).map((s, j) => {
+  const listSegments = (list: any[], prefix: string): string =>
+    (list || []).map((s: any, j: number) => {
       const role = ROLE_PROMPT_LABELS[s.role] || '其他'
       if (!s.clause) return `${prefix}${j}. "${s.text}"（${role}）`
       const note = CLAUSE_PROMPT_LABELS[s.clause.type] || '从句'
@@ -936,8 +953,8 @@ export async function generateAlignedTranslation(text, topSegments, context = ''
     try {
       const parsed = parseJsonSafely(response.choices[0].message.content)
       const raw = Array.isArray(parsed.segments) ? parsed.segments : []
-      const out = []
-      const seen = new Set()
+      const out: any[] = []
+      const seen = new Set<number>()
       for (const item of raw) {
         const enIndex = Number(item?.enIndex)
         if (!Number.isInteger(enIndex) || enIndex < 0 || enIndex >= segs.length) {
@@ -945,7 +962,7 @@ export async function generateAlignedTranslation(text, topSegments, context = ''
         }
         if (seen.has(enIndex)) throw new Error('enIndex 重复')
         seen.add(enIndex)
-        const entry = { enIndex, zh: String(item?.zh ?? '').trim() }
+        const entry: any = { enIndex, zh: String(item?.zh ?? '').trim() }
         // 从句片段：校验 children 与内部切分一一对应；失败仅丢弃 children（回退整体译文），不判整次失败
         const seg = segs[enIndex]
         if (seg?.clause) {
@@ -955,7 +972,7 @@ export async function generateAlignedTranslation(text, topSegments, context = ''
         out.push(entry)
       }
       if (seen.size !== segs.length) throw new Error('存在未对应的成分片段')
-      if (!out.some(o => o.zh || o.children?.some(c => c.zh))) throw new Error('对应译文为空')
+      if (!out.some((o: any) => o.zh || o.children?.some((c: any) => c.zh))) throw new Error('对应译文为空')
       const result = { segments: out }
       alignedCacheSet(cacheKey, result)
       return result
@@ -976,7 +993,14 @@ export async function generateAlignedTranslation(text, topSegments, context = ''
  * @param {AbortSignal} signal 外部中止信号（关闭窗口时 abort）
  * @returns {Promise<string>} 完整回答文本
  */
-export async function chatAboutSelection(history, text, context = '', fullText = '', onDelta, signal) {
+export async function chatAboutSelection(
+  history: any[],
+  text: string,
+  context = '',
+  fullText = '',
+  onDelta?: (delta: string) => void,
+  signal?: AbortSignal
+) {
   const model = getModel()
 
   const contextLine = context
@@ -1019,7 +1043,7 @@ export async function chatAboutSelection(history, text, context = '', fullText =
  * 单个单词生成（带重试）：失败后退避重试，全部尝试仍失败才抛出最后一次错误。
  * 限流/网络抖动等瞬时错误可通过重试自愈，避免整批单词静默丢失。
  */
-async function generateWordWithRetry(item, settings, signal) {
+async function generateWordWithRetry(item: any, settings: any, signal?: AbortSignal) {
   const word = typeof item === 'string' ? item : item.word
   const context = typeof item === 'string' ? '' : item.context
   const maxAttempts = 3
@@ -1032,10 +1056,10 @@ async function generateWordWithRetry(item, settings, signal) {
       return { word, info, success: true }
     } catch (error) {
       // 主动取消不重试，直接向上抛
-      if (signal?.aborted || error.name === 'AbortError') throw error
+      if (signal?.aborted || (error as Error)?.name === 'AbortError') throw error
       lastError = error
       if (settings.debugMode) {
-        console.warn(`[批量生成] "${word}" 第 ${attempt}/${maxAttempts} 次尝试失败: ${error.message}`)
+        console.warn(`[批量生成] "${word}" 第 ${attempt}/${maxAttempts} 次尝试失败: ${(error as Error)?.message}`)
       }
       if (attempt < maxAttempts) {
         // 退避等待（1s、2s），缓解限流压力
@@ -1074,7 +1098,7 @@ const WORD_BATCH_CONCURRENCY = 8
  * @param {AbortSignal} [signal] 外部中止信号
  * @returns {Promise<Array<{word: string, info?: object, error?: string, success: boolean}>>}
  */
-async function generateWordBatch(items, signal) {
+async function generateWordBatch(items: any[], signal?: AbortSignal) {
   const settings = useSettingsStore()
   const model = getModel()
 
@@ -1120,9 +1144,9 @@ async function generateWordBatch(items, signal) {
  * @param {Array<{sentence: string, words: string[]}>} groups 同语境单词组（按句子在文中先后排列）
  * @returns {Array<Array<{word: string, context: string}>>}
  */
-function packWordBatches(groups) {
-  const batches = []
-  let current = []
+function packWordBatches(groups: any[]): any[] {
+  const batches: any[][] = []
+  let current: any[] = []
   let currentChars = 0
   const flush = () => {
     if (current.length) {
@@ -1155,14 +1179,19 @@ function packWordBatches(groups) {
  * @param {(error: string|null) => void} report 单词粒度的进度回调（仅传错误信息）
  * @param {AbortSignal} [signal]
  */
-async function runWordBatch(batch, settings, report, signal) {
-  const canceled = () => batch.map(it => ({ word: it.word, error: '已取消', success: false }))
+async function runWordBatch(
+  batch: any,
+  settings: any,
+  report: (error: string | null) => void,
+  signal?: AbortSignal
+) {
+  const canceled = () => batch.map((it: any) => ({ word: it.word, error: '已取消', success: false }))
   if (signal?.aborted) return canceled()
 
   // 逐词降级：对给定单词并发发起单请求，成功/失败均按词上报进度
-  const retryOneByOne = async (list) => {
+  const retryOneByOne = async (list: any[]): Promise<any[]> => {
     const settled = await Promise.allSettled(
-      list.map(item => generateWordWithRetry(item, settings, signal))
+      list.map((item: any) => generateWordWithRetry(item, settings, signal))
     )
     return settled.map((r, i) => {
       const word = list[i].word
@@ -1180,14 +1209,14 @@ async function runWordBatch(batch, settings, report, signal) {
     const batchResults = await generateWordBatch(batch, signal)
     if (signal?.aborted) return canceled()
 
-    const results = []
-    const missing = []
+    const results: any[] = []
+    const missing: any[] = []
     for (const result of batchResults) {
       if (result.success) {
         report(null)
         results.push(result)
       } else {
-        missing.push(batch.find(item => item.word === result.word) || { word: result.word, context: '' })
+        missing.push(batch.find((item: any) => item.word === result.word) || { word: result.word, context: '' })
       }
     }
     if (missing.length) {
@@ -1200,7 +1229,7 @@ async function runWordBatch(batch, settings, report, signal) {
   } catch (error) {
     if (signal?.aborted) return canceled()
     if (settings.debugMode) {
-      console.warn(`[批量生成] 合批请求失败，降级逐词重试（${batch.length} 个词）: ${error.message}`)
+      console.warn(`[批量生成] 合批请求失败，降级逐词重试（${batch.length} 个词）: ${(error as Error)?.message}`)
     }
     return await retryOneByOne(batch)
   }
@@ -1216,24 +1245,34 @@ async function runWordBatch(batch, settings, report, signal) {
  * @param {number} [concurrency] 逐词模式为请求并发数；合批模式为批间并发数
  * @param {AbortSignal} [signal]
  */
-export async function batchGenerateWords(words, onProgress, concurrency, signal) {
+export async function batchGenerateWords(
+  words: any[],
+  onProgress?: (completed: number, total: number, error: string | null) => void,
+  concurrency?: number,
+  signal?: AbortSignal
+) {
   // 批量多线程生成会并发/分批发出多次请求，调试模式下把整批用量汇总到最后一次性打印
   return withAiUsageSummary('批量生成单词释义', () =>
     runBatchGenerateWords(words, onProgress, concurrency, signal)
   )
 }
 
-async function runBatchGenerateWords(words, onProgress, concurrency, signal) {
+async function runBatchGenerateWords(
+  words: any[],
+  onProgress?: (completed: number, total: number, error: string | null) => void,
+  concurrency?: number,
+  signal?: AbortSignal
+) {
   const settings = useSettingsStore()
-  const items = (words || []).map(item => ({
+  const items = (words || []).map((item: any) => ({
     word: typeof item === 'string' ? item : item.word,
     context: typeof item === 'string' ? '' : (item.context || '')
   }))
   const total = items.length
   let completed = 0
-  const report = (error) => {
+  const report = (error: string | null): void => {
     completed++
-    onProgress(completed, total, error || null)
+    onProgress!(completed, total, error || null)
   }
 
   // 逐词模式：与原实现保持一致
@@ -1253,12 +1292,12 @@ async function runBatchGenerateWords(words, onProgress, concurrency, signal) {
             return result
           } catch (error) {
             if (signal?.aborted) return { word: item.word, error: '已取消', success: false }
-            report(error.message)
-            return { word: item.word, error: error.message, success: false }
+            report((error as Error)?.message)
+            return { word: item.word, error: (error as Error)?.message, success: false }
           }
         })
       )
-      results.push(...batchResults.map(r => r.value || r.reason))
+      results.push(...batchResults.map((r: any) => r.value || r.reason))
     }
     return results
   }
@@ -1292,7 +1331,7 @@ async function runBatchGenerateWords(words, onProgress, concurrency, signal) {
   return results
 }
 
-const ARTICLE_STYLE_MAP = {
+const ARTICLE_STYLE_MAP: Record<string, string> = {
   general: '通用',
   story: '故事',
   news: '新闻',
@@ -1300,12 +1339,12 @@ const ARTICLE_STYLE_MAP = {
   dialogue: '对话'
 }
 
-const ESSAY_TYPE_MAP = {
+const ESSAY_TYPE_MAP: Record<string, string> = {
   small: '高中小作文（简洁正式的应用文）',
   long: '高中大作文（读后续写风格，以叙事为主，情节完整且有推进）'
 }
 
-const FORMAT_MAP = {
+const FORMAT_MAP: Record<string, string> = {
   general: '普通作文（无特定格式，按常规作文书写）',
   recommendation: '推荐信（应用文书信格式，开头称呼，正文说明推荐理由，结尾用 Yours sincerely 并署名 Li Hua）',
   thankYou: '感谢信（应用文书信格式，开头称呼，正文表达感谢及原因，结尾用 Yours sincerely 并署名 Li Hua）',
@@ -1316,7 +1355,7 @@ const FORMAT_MAP = {
   complaint: '投诉信（应用文书信格式，开头称呼，正文客观说明问题并表达诉求，结尾用 Yours sincerely 并署名 Li Hua）'
 }
 
-export async function generateArticle(words, options = {}) {
+export async function generateArticle(words: string[], options: any = {}, signal?: AbortSignal) {
   const model = getModel()
 
   const {
@@ -1387,12 +1426,12 @@ export async function generateArticle(words, options = {}) {
       { role: 'user', content: userContent }
     ],
     max_tokens: maxTokens
-  }), 'text', undefined, '文章生成')
+  }), 'text', signal, '文章生成')
 
   return response.choices[0].message.content
 }
 
-export async function generateArticleMeta(content, options = {}) {
+export async function generateArticleMeta(content: string, options: any = {}) {
   const model = getModel()
 
   const {
@@ -1438,17 +1477,17 @@ export async function generateArticleMeta(content, options = {}) {
   }
 }
 
-export async function fetchModels(providerId) {
+export async function fetchModels(providerId: string) {
   const settings = useSettingsStore()
   const provider = settings.providers.find(p => p.id === providerId)
   if (!provider || !provider.endpoint || !provider.apiKey) {
     throw new Error('请先选择供应商并填写 API Key')
   }
   const list = await listModelsForProvider(provider)
-  return list.data.map(m => m.id).sort()
+  return list.data.map((m: any) => m.id).sort()
 }
 
-export async function testConnection(type = 'text') {
+export async function testConnection(type: ChatModelType = 'text') {
   try {
     const model = getModel(type)
 
@@ -1492,15 +1531,15 @@ export async function testConnection(type = 'text') {
     }), type, undefined, '文本连通测试')
     return { success: true, message: '连接成功' }
   } catch (error) {
-    return { success: false, message: error.message }
+    return { success: false, message: (error as Error)?.message }
   }
 }
 
 // ---- 图片识别（视觉模型） ----
 
 /** 构建多模态用户消息：文本指令 + 多张图片（按传入顺序） */
-function imageContent(imageDataUrls, text) {
-  const parts = [{ type: 'text', text }]
+function imageContent(imageDataUrls: string[], text: string) {
+  const parts: any[] = [{ type: 'text', text }]
   for (const url of imageDataUrls) {
     parts.push({ type: 'image_url', image_url: { url } })
   }
@@ -1508,7 +1547,7 @@ function imageContent(imageDataUrls, text) {
 }
 
 /** 稳健解析模型返回的 JSON：兼容被 markdown 代码块包裹、或前后带杂字的情况 */
-function parseJsonSafely(content) {
+function parseJsonSafely(content: string): any {
   const text = (content || '').trim()
   try {
     return JSON.parse(text)
@@ -1539,7 +1578,11 @@ export const IMAGE_TOKENS_BUDGET = 1000
  * @param {string[]} imageDataUrls 图片 Data URL（base64）数组
  * @returns {Promise<{title: string, description: string, content: string}>}
  */
-export async function extractArticleFromImages(imageDataUrls, onProgress) {
+export async function extractArticleFromImages(
+  imageDataUrls: string[],
+  onProgress?: (current: number, total: number) => void,
+  signal?: AbortSignal
+) {
   const model = getModel('vision')
   const budget = IMAGE_TOKENS_BUDGET * imageDataUrls.length
 
@@ -1570,9 +1613,11 @@ export async function extractArticleFromImages(imageDataUrls, onProgress) {
     ],
     response_format: { type: 'json_object' },
     max_tokens: IMAGE_MAX_TOKENS
+    // 原调用缺少 signal 占位，导致 label 落在 signal 参数位（运行时无效信号，等价于未传）；
+    // 此处补占位使参数归位，并把外部传入的 signal 透传给请求层（取消即中止在途 fetch）
   }), 'vision', onProgress
-    ? (_delta, full) => onProgress(Math.min(budget, estimateTokens(full)), budget)
-    : undefined, '图片识别文章')
+    ? (_delta: string, full?: string) => onProgress(Math.min(budget, estimateTokens(full || '')), budget)
+    : undefined, signal, '图片识别文章')
 
   const parsed = parseJsonSafely(content)
   return {
@@ -1587,7 +1632,10 @@ export async function extractArticleFromImages(imageDataUrls, onProgress) {
  * @param {string[]} imageDataUrls 图片 Data URL（base64）数组
  * @returns {Promise<object>} 生成参数对象
  */
-export async function extractTaskFromImages(imageDataUrls, onProgress) {
+export async function extractTaskFromImages(
+  imageDataUrls: string[],
+  onProgress?: (current: number, total: number) => void
+) {
   const model = getModel('vision')
   const budget = IMAGE_TOKENS_BUDGET * imageDataUrls.length
 
@@ -1628,9 +1676,10 @@ ${multiImageHint}`
     ],
     response_format: { type: 'json_object' },
     max_tokens: IMAGE_MAX_TOKENS
+    // 同 extractArticleFromImages：补 undefined 占位使 label 归位（signal 原本无效，语义一致）
   }), 'vision', onProgress
-    ? (_delta, full) => onProgress(Math.min(budget, estimateTokens(full)), budget)
-    : undefined, '图片识别题目')
+    ? (_delta: string, full?: string) => onProgress(Math.min(budget, estimateTokens(full || '')), budget)
+    : undefined, undefined, '图片识别题目')
 
   const parsed = parseJsonSafely(content)
   return {
@@ -1644,7 +1693,7 @@ ${multiImageHint}`
     customDescription: String(parsed.customDescription || '').trim(),
     sourceArticle: String(parsed.sourceArticle || '').trim(),
     words: Array.isArray(parsed.words)
-      ? parsed.words.map(w => String(w).trim()).filter(Boolean)
+      ? parsed.words.map((w: any) => String(w).trim()).filter(Boolean)
       : []
   }
 }

@@ -1,7 +1,9 @@
 <script setup>
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, watch, nextTick, onUnmounted } from 'vue'
 import { Send, X, ChevronDown } from 'lucide-vue-next'
 import { chatAboutSelection } from '../../services/ai'
+import { errorText } from '../../services/errors'
+import { useDialogA11y } from '../../composables/useDialogA11y'
 
 const props = defineProps({
   text: String,
@@ -15,7 +17,8 @@ const emit = defineEmits(['close'])
 const messages = ref([]) // [{ role: 'user' | 'assistant', content }]
 const input = ref('')
 const sending = ref(false)
-const sendingError = ref(false)
+// 失败原因文案（空串表示无错误）：把 AI 抛出的可行动消息透出，避免只显示「生成失败」
+const sendingError = ref('')
 
 const listRef = ref(null)
 const inputRef = ref(null)
@@ -63,7 +66,8 @@ watch(input, () => nextTick(autoResize))
 
 function handleKeydown(e) {
   // Enter 发送 / Shift+Enter 换行
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // isComposing：中文等输入法用回车确认候选词，不能当作发送（否则会发出半截内容）
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault()
     send()
   }
@@ -79,7 +83,7 @@ function send(question) {
 
 async function sendToAI() {
   sending.value = true
-  sendingError.value = false
+  sendingError.value = ''
   // 对话历史含本轮刚加入的用户消息，由服务端拼装完整多轮上下文
   const history = messages.value.map(m => ({ role: m.role, content: m.content }))
   messages.value.push({ role: 'assistant', content: '' })
@@ -100,8 +104,8 @@ async function sendToAI() {
     messages.value[assistantIndex].content = full
   } catch (error) {
     if (!alive || error?.name === 'AbortError') return
-    console.error('追问解析生成失败:', error.message)
-    sendingError.value = true
+    console.error('追问解析生成失败:', error)
+    sendingError.value = errorText(error, '生成失败，请重试')
   } finally {
     ctrl = null
     if (alive) {
@@ -125,22 +129,23 @@ function close() {
   emit('close')
 }
 
-function handleEsc(e) {
-  if (e.key === 'Escape') close()
-}
-
-onMounted(() => {
-  document.addEventListener('keydown', handleEsc)
-  // 移动端不自动聚焦输入框，避免键盘挡住对话区
-  if (window.matchMedia('(pointer: fine)').matches) {
-    inputRef.value?.focus()
-  }
+// 弹窗无障碍：Esc 关闭、焦点移入/归还、Tab 循环（本组件挂载即打开）。
+// PC 端初始聚焦输入框可直接开始追问；移动端不聚焦 textarea（避免弹起键盘挡住对话区），
+// 只聚焦面板本身。
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => true,
+  onClose: () => close(),
+  panelRef,
+  initialFocusSelector:
+    typeof window !== 'undefined' && window.matchMedia?.('(pointer: fine)')?.matches
+      ? 'textarea'
+      : undefined
 })
 
 onUnmounted(() => {
   alive = false
   ctrl?.abort()
-  document.removeEventListener('keydown', handleEsc)
 })
 </script>
 
@@ -148,6 +153,10 @@ onUnmounted(() => {
   <div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
     <div class="absolute inset-0 bg-black/40" @click="close"></div>
     <div
+      ref="panelRef"
+      role="dialog"
+      aria-modal="true"
+      aria-label="语法追问"
       class="relative w-full sm:max-w-3xl lg:max-w-4xl bg-white dark:bg-neutral-900 rounded-t-2xl sm:rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 flex flex-col h-[90vh] sm:h-auto sm:max-h-[80vh]"
     >
       <div class="flex justify-center pt-2 sm:hidden">
@@ -209,8 +218,8 @@ onUnmounted(() => {
               </div>
             </div>
           </template>
-          <div v-if="sendingError" class="flex items-center gap-2">
-            <span class="text-xs text-red-500 dark:text-red-400">生成失败</span>
+          <div v-if="sendingError" class="flex items-start gap-2">
+            <span class="text-xs text-red-500 dark:text-red-400">{{ sendingError }}</span>
             <button
               @click="retrySend"
               class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"

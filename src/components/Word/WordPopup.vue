@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { speak, isSpeechSupported } from '../../services/tts'
+import { useDialogA11y } from '../../composables/useDialogA11y'
 
 const props = defineProps({
   word: String,
@@ -9,7 +10,8 @@ const props = defineProps({
   loading: Boolean,
   loadingContext: Boolean,
   contextTranslation: String,
-  contextError: Boolean,
+  // 兼容布尔（旧用法：仅表示失败）与字符串（失败原因，可直接展示）
+  contextError: [Boolean, String],
   articleId: Number,
   isMarked: Boolean
 })
@@ -21,6 +23,14 @@ const popupStyle = ref({
   left: '-9999px',
   top: '-9999px',
   opacity: 0
+})
+
+// 弹窗无障碍：Esc 关闭（复用带收起动画的 startClose）、焦点移入/归还、Tab 循环。
+// 本组件挂载即打开（父级 v-if 控制显隐），面板即根节点（popupRef 同时用于定位）。
+useDialogA11y({
+  isOpen: () => true,
+  onClose: () => startClose(),
+  panelRef: popupRef
 })
 
 const isMobile = ref(false)
@@ -54,6 +64,12 @@ const handleMqChange = (e) => {
 }
 
 const definitions = computed(() => props.wordInfo?.definitions?.slice(0, 2) || [])
+
+// 上下文释义失败原因：优先展示 AI 抛出的可行动消息，非字符串（旧布尔用法）时回退通用文案
+const contextErrorText = computed(() => {
+  const e = props.contextError
+  return typeof e === 'string' && e ? e : '解释失败'
+})
 
 // 发音：浏览器原生 TTS（不支持时隐藏按钮）
 const speechSupported = isSpeechSupported()
@@ -257,6 +273,9 @@ function handleResize() {
 <template>
   <div
     ref="popupRef"
+    role="dialog"
+    aria-modal="true"
+    aria-label="单词释义"
     class="fixed z-50 bg-white dark:bg-neutral-900 transition-opacity duration-150"
     :class="isMobile
       ? [
@@ -347,8 +366,8 @@ function handleResize() {
                 <span v-else>{{ part.text }}</span>
               </template>
             </div>
-            <div v-else-if="contextError" class="flex items-center gap-2 py-1">
-              <span class="text-xs text-red-500 dark:text-red-400">解释失败</span>
+            <div v-else-if="contextError" class="flex items-start gap-2 py-1">
+              <span class="text-xs text-red-500 dark:text-red-400">{{ contextErrorText }}</span>
               <button
                 @click="$emit('retry-context')"
                 class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"

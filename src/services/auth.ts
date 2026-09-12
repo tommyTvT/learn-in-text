@@ -11,8 +11,20 @@ import { getSupabase } from '../lib/supabase'
 // 并让本地数据归属判断在离线状态下依然可用。
 const IDENTITY_KEY = 'learn_in_text_auth_identity'
 
+/** 身份快照结构（localStorage 持久化） */
+export interface IdentitySnapshot {
+  userId: string
+  username: string
+  email: string
+  /** 写入时间戳（毫秒） */
+  at: number
+}
+
 /** 持久化身份快照（登录/注册/会话恢复成功时调用） */
-export function persistIdentity(user, username) {
+export function persistIdentity(
+  user: { id?: string; email?: string | null } | null | undefined,
+  username?: string
+): void {
   if (!user?.id) return
   try {
     localStorage.setItem(IDENTITY_KEY, JSON.stringify({
@@ -27,7 +39,7 @@ export function persistIdentity(user, username) {
 }
 
 /** 读取身份快照（无有效记录返回 null） */
-export function readIdentity() {
+export function readIdentity(): IdentitySnapshot | null {
   try {
     const raw = localStorage.getItem(IDENTITY_KEY)
     if (!raw) return null
@@ -40,7 +52,7 @@ export function readIdentity() {
 }
 
 /** 清除身份快照（仅在用户主动登出时调用；会话暂时失效不要清除） */
-export function clearIdentity() {
+export function clearIdentity(): void {
   try {
     localStorage.removeItem(IDENTITY_KEY)
   } catch {
@@ -54,7 +66,7 @@ export function clearIdentity() {
  * 网络不可达、请求超时、服务端 5xx、限流等。
  * 非暂时性（如 Invalid Refresh Token）表示会话已被云端撤销，只能重新登录。
  */
-export function isRetryableAuthError(error) {
+export function isRetryableAuthError(error: any): boolean {
   if (!error) return false
   const status = Number(error.status)
   // auth-js 的网络类错误（AuthRetryableFetchError）status 为 0
@@ -65,10 +77,13 @@ export function isRetryableAuthError(error) {
 }
 
 /** 将后端错误转成用户可读的中文提示 */
-export function readableError(error) {
+export function readableError(error: any): string {
   if (!error) return '未知错误'
   const msg = (error.message || '').toLowerCase()
-  if (msg.includes('invalid login credentials')) return '用户名或密码错误'
+  if (msg.includes('invalid login credentials')) return '邮箱或密码错误'
+  if (msg.includes('username_immutable')) return '用户名已设置，不可重复设置'
+  if (msg.includes('invalid_username_format')) return '用户名需为 3-20 位字母、数字或下划线'
+  if (msg.includes('profile_not_found')) return '账号资料不存在，请重新登录'
   if (msg.includes('user already registered') || msg.includes('already registered')) return '该邮箱已被注册'
   if (msg.includes('email not confirmed')) return '邮箱尚未确认，请先完成邮箱验证'
   if (msg.includes('rate limit') || msg.includes('too many requests')) return '操作过于频繁，请稍后再试'
@@ -80,7 +95,7 @@ export function readableError(error) {
 }
 
 /** 校验并规范化用户名（仅允许字母数字下划线，长度 3-20） */
-export function validateUsername(username) {
+export function validateUsername(username: string | undefined): string {
   const name = (username || '').trim()
   if (!name) return '请输入用户名'
   if (!/^[a-zA-Z0-9_]{3,20}$/.test(name)) {
@@ -90,72 +105,40 @@ export function validateUsername(username) {
 }
 
 /** 校验邮箱格式 */
-export function validateEmail(email) {
+export function validateEmail(email: string | undefined): string {
   const value = (email || '').trim()
   if (!value) return '请输入邮箱'
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return '请输入有效的邮箱地址'
   return ''
 }
 
-/** 校验登录标识：允许「用户名」或「邮箱」，只需非空 */
-export function validateLoginIdentifier(value) {
-  const identifier = (value || '').trim()
-  if (!identifier) return '请输入用户名或邮箱'
-  return ''
-}
-
 /** 校验密码长度 */
-export function validatePassword(password) {
+export function validatePassword(password: string | undefined): string {
   if (!password) return '请输入密码'
   if (password.length < 6) return '密码至少 6 位'
   return ''
 }
 
-/** 注册：创建 Auth 用户，用户名通过 raw_user_meta_data 传给触发器写入 profiles。
- * 邮箱确认开启时 signUp 返回空 session，需要引导用户完成邮箱验证。
+/** 登录：邮箱 + 密码。
+ * 测试阶段注册已下线，账号由管理员在 Supabase 控制台手动创建，
+ * 不再做「用户名 → 邮箱」解析（该匿名 RPC 会向未认证调用者泄露任意用户邮箱）。
  */
-export async function register({ username, email, password }) {
+export async function login({ email, password }: { email: string; password: string }) {
   const supabase = getSupabase()
-
-  // 先校验用户名是否已被占用（通过 RPC，非敏感泄露仅返回布尔）
-  const { data: exists, error: existsError } = await supabase.rpc('username_exists', { uname: username })
-  if (existsError) throw new Error(readableError(existsError))
-  if (exists) throw new Error('该用户名已被占用')
-
-  const origin = typeof window !== 'undefined' ? window.location.origin : ''
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: { username },
-      // 邮箱确认链接验证成功后跳转到结果页展示提示并自动登录
-      // 注意：uni-app H5 端为 hash 路由，页面路径须带 # 前缀
-      emailRedirectTo: origin ? `${origin}/#/email-verified` : undefined
-    }
-  })
-  if (error) throw new Error(readableError(error))
-
-  // 无需邮箱确认时 signUp 直接返回 session
-  if (data.session) {
-    return { session: data.session, user: data.user }
-  }
-
-  // 邮箱确认开启：返回标记，由调用方引导用户去邮箱确认
-  throw new Error('NEED_EMAIL_CONFIRM')
-}
-
-/** 登录：支持「用户名」或「邮箱」两种标识 + 密码 */
-export async function login({ username, password }) {
-  const supabase = getSupabase()
-
-  const { data: email, error: resolveError } = await supabase.rpc('resolve_login_identifier', { identifier: username })
-  if (resolveError) throw new Error(readableError(resolveError))
-  if (!email) throw new Error('用户名或邮箱不存在')
 
   const { data, error } = await supabase.auth.signInWithPassword({ email, password })
   if (error) throw new Error(readableError(error))
 
   return { session: data.session, user: data.user }
+}
+
+/** 首次登录绑定用户名：走服务端 set_username RPC（仅当前为空时允许，
+ * 含格式与撞名校验）。手动创建的账号 profiles.username 为空，
+ * 云同步与数据归属判断依赖用户名，登录后需引导完成一次绑定。 */
+export async function setUsername(username: string): Promise<void> {
+  const supabase = getSupabase()
+  const { error } = await supabase.rpc('set_username', { uname: username })
+  if (error) throw new Error(readableError(error))
 }
 
 /**
@@ -171,7 +154,7 @@ export async function handleEmailConfirmation() {
 }
 
 /** 登出 */
-export async function logout() {
+export async function logout(): Promise<void> {
   const supabase = getSupabase()
   const { error } = await supabase.auth.signOut()
   if (error) throw new Error(readableError(error))
@@ -213,7 +196,7 @@ export async function loadSession() {
  * metadataUsername 来自 JWT 的 user_metadata（注册时写入），
  * 作为离线/请求失败时的回退值 —— 避免一次网络抖动就让应用「像没登录」。
  */
-export async function fetchUsername(userId, metadataUsername = '') {
+export async function fetchUsername(userId: string | null | undefined, metadataUsername = ''): Promise<string> {
   if (!userId) return metadataUsername || ''
   try {
     const supabase = getSupabase()

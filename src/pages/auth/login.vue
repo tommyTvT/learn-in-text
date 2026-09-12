@@ -2,14 +2,13 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter, usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
-import ULink from '../../components/Common/ULink.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useSettingsStore } from '../../stores/settings'
-import { validateLoginIdentifier, validatePassword, readableError } from '../../services/auth'
+import { validateEmail, validateUsername, validatePassword, readableError } from '../../services/auth'
 import { getLocalDataStats, getLocalDataOwner, setLocalDataOwner, setOwnershipPending, clearOwnershipPending, getOwnershipPending } from '../../services/localData'
 import { pauseAutoSync, resumeAutoSync, syncAfterLogin } from '../../services/autoSync'
 import LocalDataModal from '../../components/Common/LocalDataModal.vue'
-import { User, Lock, LoaderCircle } from 'lucide-vue-next'
+import { User, Mail, Lock, LoaderCircle } from 'lucide-vue-next'
 
 const auth = useAuthStore()
 const settingsStore = useSettingsStore()
@@ -17,10 +16,15 @@ usePageRoute()
 const router = useRouter()
 const route = useRoute()
 
-const username = ref('')
+const email = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
+// 手动创建的账号首次登录：profiles.username 为空时引导绑定用户名（云同步依赖用户名做数据归属）
+const needUsername = ref(false)
+const newUsername = ref('')
+const usernameError = ref('')
+const usernameSaving = ref(false)
 const showLocalDataModal = ref(false)
 const localDataStats = ref(null)
 // 登录后同步进度（label + percent），登录点击到跳转期间展示
@@ -42,7 +46,10 @@ function getRedirect() {
 }
 
 async function onSubmit() {
-  error.value = validateLoginIdentifier(username.value) || validatePassword(password.value)
+  // 并发守卫：uni-h5 在输入框回车时会触发 confirm，按钮的 disabled 挡不住键盘路径，
+  // 重复提交会造成并发登录请求与 pause/resume 自动同步错乱
+  if (loading.value) return
+  error.value = validateEmail(email.value) || validatePassword(password.value)
   if (error.value) return
 
   // 登录请求期间就暂停后台自动同步：登录成功到归属检测完成之间存在窗口，
@@ -51,7 +58,12 @@ async function onSubmit() {
   loading.value = true
   setProgress('正在登录…', 8)
   try {
-    await auth.login({ username: username.value.trim(), password: password.value })
+    await auth.login({ email: email.value.trim(), password: password.value })
+    // 手动创建的账号尚未绑定用户名：先完成一次性绑定，再进入登录收尾
+    if (!auth.username) {
+      needUsername.value = true
+      return
+    }
     // IndexedDB 不分账号：本地残留其他账号/离线数据时，先让用户决定是否合并，再进入应用
     const stats = await getLocalDataStats()
     const hasData = stats.articles > 0 || stats.words > 0 || stats.wordMarks > 0
@@ -70,6 +82,28 @@ async function onSubmit() {
   } finally {
     loading.value = false
   }
+}
+
+/** 手动建号账号的首次用户名绑定：服务端校验格式与唯一性，成功后继续登录收尾 */
+async function onSetUsername() {
+  usernameError.value = validateUsername(newUsername.value)
+  if (usernameError.value) return
+  usernameSaving.value = true
+  try {
+    await auth.setUsername(newUsername.value.trim())
+    needUsername.value = false
+    await finishLoginWithoutConflict()
+  } catch (e) {
+    usernameError.value = readableError(e)
+  } finally {
+    usernameSaving.value = false
+  }
+}
+
+/** 跳过绑定：可正常使用本地功能，但云同步在绑定用户名前不会生效 */
+function onSkipUsername() {
+  needUsername.value = false
+  void finishLoginWithoutConflict()
 }
 
 /** 无数据冲突路径的收尾：重置残留设置 → 绑定归属 → 同步设置与数据 → 进入应用 */
@@ -127,6 +161,11 @@ watch(() => auth.isLoggedIn, (loggedIn) => {
 
 onMounted(() => {
   if (auth.isLoggedIn) {
+    // 手动创建的账号未绑定用户名：先引导完成一次性绑定（云同步依赖用户名）
+    if (!auth.username) {
+      needUsername.value = true
+      return
+    }
     // 上次登录的归属决策未完成（弹窗期间离开页面）：继续决策而非直接进入
     if (getOwnershipPending() === auth.username && auth.username) {
       resumeOwnershipDecision()
@@ -167,20 +206,69 @@ onUnmounted(() => {
           <span>{{ sessionNotice }}（本地学习数据仍然保留，登录后会自动同步）</span>
         </div>
 
-        <div class="space-y-5">
+        <!-- 手动创建账号的首次用户名绑定（云同步依赖用户名做数据归属） -->
+        <div v-if="needUsername" class="space-y-4">
           <div>
-            <label for="username" class="block text-sm font-medium text-gray-700 dark:text-neutral-300">用户名或邮箱</label>
-            <div class="relative mt-1">
+            <label for="newUsername" class="block text-sm font-medium text-gray-700 dark:text-neutral-300">设置用户名</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-neutral-400">
+              你的账号由管理员创建，首次登录请设置用户名（3-20 位字母、数字或下划线），用于云端数据归属与多设备同步。
+            </p>
+            <div class="relative mt-2">
               <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
                 <User class="w-5 h-5" />
               </span>
               <input
-                id="username"
-                v-model="username"
+                id="newUsername"
+                v-model="newUsername"
                 type="text"
                 autocomplete="username"
+                aria-label="设置用户名"
+                @confirm="onSetUsername"
+                placeholder="3-20 位字母、数字或下划线"
+                class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-gray-300 dark:border-neutral-700 bg-gray-50 dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+          </div>
+
+          <p v-if="usernameError" role="alert" class="text-sm text-red-600 dark:text-red-400">{{ usernameError }}</p>
+
+          <div class="flex gap-3">
+            <button
+              type="button"
+              @click="onSetUsername"
+              :disabled="usernameSaving"
+              class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all cursor-pointer"
+            >
+              <LoaderCircle v-if="usernameSaving" class="w-5 h-5 animate-spin" />
+              <template v-else>绑定并继续</template>
+            </button>
+            <button
+              type="button"
+              @click="onSkipUsername"
+              :disabled="usernameSaving"
+              class="px-4 py-2.5 rounded-lg border border-gray-300 dark:border-neutral-700 text-gray-600 dark:text-neutral-300 font-medium hover:bg-gray-50 dark:hover:bg-neutral-800 disabled:opacity-60 disabled:cursor-not-allowed transition-all cursor-pointer"
+            >
+              暂时跳过
+            </button>
+          </div>
+          <p class="text-xs text-gray-400 dark:text-neutral-500">跳过后可正常使用本地功能，但云同步在绑定用户名前不会生效。</p>
+        </div>
+
+        <div v-else class="space-y-5">
+          <div>
+            <label for="email" class="block text-sm font-medium text-gray-700 dark:text-neutral-300">邮箱</label>
+            <div class="relative mt-1">
+              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                <Mail class="w-5 h-5" />
+              </span>
+              <input
+                id="email"
+                v-model="email"
+                type="email"
+                autocomplete="email"
+                aria-label="邮箱"
                 @confirm="onSubmit"
-                placeholder="输入用户名或邮箱"
+                placeholder="name@example.com"
                 class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-gray-300 dark:border-neutral-700 bg-gray-50 dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
@@ -197,6 +285,7 @@ onUnmounted(() => {
                 v-model="password"
                 type="password"
                 autocomplete="current-password"
+                aria-label="密码"
                 @confirm="onSubmit"
                 placeholder="输入密码"
                 class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-gray-300 dark:border-neutral-700 bg-gray-50 dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
@@ -204,7 +293,8 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <p v-if="error" class="text-sm text-red-600 dark:text-red-400">{{ error }}</p>
+          <!-- role="alert"：动态出现的错误需要被读屏即时播报 -->
+          <p v-if="error" role="alert" class="text-sm text-red-600 dark:text-red-400">{{ error }}</p>
 
           <button
             type="button"
@@ -231,10 +321,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <p class="mt-5 text-center text-sm text-gray-500 dark:text-neutral-400">
-          还没有账号？
-          <ULink to="/register" class="text-blue-600 dark:text-blue-400 hover:underline">立即注册</ULink>
-        </p>
+        <p class="mt-5 text-center text-xs text-gray-400 dark:text-neutral-500">测试阶段账号由管理员创建，暂不开放注册</p>
       </div>
     </div>
 

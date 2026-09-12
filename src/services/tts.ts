@@ -4,13 +4,13 @@
  */
 
 // 保存当前 utterance 引用，避免被 GC 导致 Chrome 不发声（已知坑）
-let currentUtterance = null
+let currentUtterance: SpeechSynthesisUtterance | null = null
 // 缓存选中的英文音色（voices 列表在部分浏览器异步加载）
-let cachedVoice = null
+let cachedVoice: SpeechSynthesisVoice | null = null
 let voicesReady = false
 
 /** 是否支持语音合成（极老浏览器降级隐藏发音入口） */
-export function isSpeechSupported() {
+export function isSpeechSupported(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window
 }
 
@@ -18,7 +18,7 @@ export function isSpeechSupported() {
 const VOICE_NAME_PREFERENCES = ['Google US English', 'Microsoft Aria', 'Microsoft Jenny', 'Samantha']
 
 /** 从系统音色列表中挑选一个英文音色 */
-function pickEnglishVoice(voices) {
+function pickEnglishVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
   const english = (voices || []).filter(v => /^en([-_]|$)/i.test(v.lang))
   if (!english.length) return null
   for (const keyword of VOICE_NAME_PREFERENCES) {
@@ -30,8 +30,10 @@ function pickEnglishVoice(voices) {
 }
 
 /** 获取英文音色（带异步缓存） */
-function getEnglishVoice() {
-  if (voicesReady && cachedVoice !== undefined) return cachedVoice
+function getEnglishVoice(): SpeechSynthesisVoice | null {
+  // voicesReady 为 true 代表音色列表已查询过：此时 cachedVoice 为 null（没有英文音色）
+  // 也是「已确定的结果」，直接返回，避免每次调用都重新遍历整张音色表
+  if (voicesReady) return cachedVoice
   const voices = window.speechSynthesis.getVoices()
   if (voices.length) {
     cachedVoice = pickEnglishVoice(voices)
@@ -50,9 +52,9 @@ if (isSpeechSupported()) {
 
 /**
  * 播放英文文本发音（先取消上一次，避免连点叠音）
- * @param {string} text 待发音的英文单词/短语
+ * @param text 待发音的英文单词/短语
  */
-export function speak(text) {
+export function speak(text: string): void {
   if (!isSpeechSupported() || !text) return
   try {
     window.speechSynthesis.cancel()
@@ -73,7 +75,7 @@ export function speak(text) {
 }
 
 /** 停止当前发音 */
-export function stopSpeak() {
+export function stopSpeak(): void {
   if (!isSpeechSupported()) return
   try {
     window.speechSynthesis.cancel()

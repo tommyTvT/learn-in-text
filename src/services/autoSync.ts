@@ -12,17 +12,25 @@ const RETRY_BACKOFF_MS = 60_000
 // 自动同步固定间隔（分钟）：同步间隔固定为 5 分钟，不再由用户配置
 const AUTO_SYNC_INTERVAL_MIN = 5
 
-let timer = null
+let timer: ReturnType<typeof setInterval> | null = null
 let started = false
 let running = false
 let lastAttemptAt = 0
-let bootDelayTimer = null
-let stopWatchers = []
+let bootDelayTimer: ReturnType<typeof setTimeout> | null = null
+let stopWatchers: Array<() => void> = []
 // 暂停标志：本地数据归属决策进行中时阻止一切后台自动同步，
 // 防止用户在弹窗上选择前，残留数据被 boot/切前台/网络恢复等触发源推给新账号
 let paused = false
 
-function readStoredState() {
+/** 最近一次同步结果（持久化结构） */
+export interface LastSyncState {
+  success: boolean
+  message: string
+  /** 记录时间戳（毫秒） */
+  at: number
+}
+
+function readStoredState(): LastSyncState | null {
   try {
     return JSON.parse(localStorage.getItem(LAST_SYNC_KEY) || 'null')
   } catch {
@@ -31,9 +39,9 @@ function readStoredState() {
 }
 
 /** 最近一次同步结果（成功/失败），设置页展示用 */
-export const lastSyncState = ref(readStoredState())
+export const lastSyncState = ref<LastSyncState | null>(readStoredState())
 
-function storeState(success, message) {
+function storeState(success: boolean, message: string): void {
   const state = { success, message, at: Date.now() }
   try {
     localStorage.setItem(LAST_SYNC_KEY, JSON.stringify(state))
@@ -44,7 +52,7 @@ function storeState(success, message) {
 }
 
 /** 同步触发来源的中文标签（调试输出用） */
-const SOURCE_LABELS = {
+const SOURCE_LABELS: Record<string, string> = {
   manual: '手动同步',
   auto: '自动定时',
   boot: '应用启动',
@@ -56,7 +64,7 @@ const SOURCE_LABELS = {
 }
 
 /** 各表中文名（调试输出用） */
-const TABLE_LABELS = {
+const TABLE_LABELS: Record<string, string> = {
   articles: '文章',
   words: '单词',
   word_marks: '标记',
@@ -64,8 +72,8 @@ const TABLE_LABELS = {
 }
 
 /** 把统计对象（如 detail.pushed）转为「中文表名 → 数量」，只保留非零项 */
-function nonzeroCounts(counts) {
-  const out = {}
+function nonzeroCounts(counts: Record<string, number> | null | undefined): Record<string, number> {
+  const out: Record<string, number> = {}
   for (const [table, value] of Object.entries(counts || {})) {
     if (value) out[TABLE_LABELS[table] || table] = value
   }
@@ -79,7 +87,7 @@ function nonzeroCounts(counts) {
  * - 成功但无数据变更：仅打印一行摘要（时间 · 来源 · 耗时）；
  * - 成功且有变更：打印分组详情，表格只列出发生变化的数据表。
  */
-function debugLogSync(source, success, message, detail) {
+function debugLogSync(source: string, success: boolean, message: string, detail: any): void {
   const settings = useSettingsStore()
   if (!settings.debugMode) return
 
@@ -97,12 +105,12 @@ function debugLogSync(source, success, message, detail) {
     return
   }
 
-  const groups = [
+  const groups: Array<[string, Record<string, number>]> = [
     ['推送云端', detail?.pushed],
     ['本地新增', detail?.added],
     ['更新', detail?.updated],
     ['删除', detail?.deleted]
-  ].map(([label, counts]) => [label, nonzeroCounts(counts)])
+  ].map(([label, counts]): [string, Record<string, number>] => [label as string, nonzeroCounts(counts)])
   const duration = detail ? `${(detail.durationMs / 1000).toFixed(2)}s` : '-'
 
   // 无变更（后台同步最常见的结果）：只留一行，不展开表格
@@ -127,7 +135,7 @@ function debugLogSync(source, success, message, detail) {
 }
 
 /** 手动同步完成后，将结果同步到「上次同步」状态（供设置页展示），并在 debug 模式输出到控制台 */
-export function setLastSyncState(success, message, detail = null, source = 'manual') {
+export function setLastSyncState(success: boolean, message: string, detail: any = null, source = 'manual'): void {
   storeState(success, message)
   debugLogSync(source, success, message, detail)
 }
@@ -140,17 +148,19 @@ export function setLastSyncState(success, message, detail = null, source = 'manu
  * 后续可由自动同步或手动同步重试。
  * onProgress({ label, percent })：可选进度回调，透传给 syncNow 供登录页展示进度条。
  */
-export async function syncAfterLogin(onProgress) {
+export async function syncAfterLogin(
+  onProgress?: (progress: { label: string; percent: number }) => void
+): Promise<void> {
   try {
     const result = await syncNow(onProgress)
     setLastSyncState(true, result.message, result.detail, 'login')
   } catch (error) {
-    setLastSyncState(false, error.message || '同步失败', null, 'login')
+    setLastSyncState(false, (error as Error)?.message || '同步失败', null, 'login')
   }
 }
 
 /** 清空本地数据后重置同步状态（登出清除 / 换号清除场景） */
-export function resetLastSyncState() {
+export function resetLastSyncState(): void {
   try {
     localStorage.removeItem(LAST_SYNC_KEY)
   } catch {
@@ -160,26 +170,26 @@ export function resetLastSyncState() {
 }
 
 /** 暂停后台自动同步（本地数据归属决策进行中） */
-export function pauseAutoSync() {
+export function pauseAutoSync(): void {
   paused = true
 }
 
 /** 恢复后台自动同步（归属决策完成） */
-export function resumeAutoSync() {
+export function resumeAutoSync(): void {
   paused = false
 }
 
 // 翻页触发的同步延迟防抖：切换页面后等待一段时间再执行，
 // 避免与页面切换动画、首屏渲染抢占资源导致卡顿；多次快速翻页只同步一次。
 const ROUTE_SYNC_DELAY_MS = 1500
-let routeSyncTimer = null
+let routeSyncTimer: ReturnType<typeof setTimeout> | null = null
 
 /**
  * 公开的同步请求入口：受防重入 / 失败退避 / 跨标签页锁保护。
  * 供切换页面（路由）、网络恢复等场景调用；未配置或时机不合适时静默跳过。
  * 路由触发的同步延迟防抖执行，避免翻页瞬间抢资源。
  */
-export function requestSync() {
+export function requestSync(): void {
   if (routeSyncTimer) clearTimeout(routeSyncTimer)
   routeSyncTimer = setTimeout(() => {
     routeSyncTimer = null
@@ -187,7 +197,7 @@ export function requestSync() {
   }, ROUTE_SYNC_DELAY_MS)
 }
 
-function isConfigured() {
+function isConfigured(): boolean {
   const s = useSettingsStore()
   const auth = useAuthStore()
   // auth.ready：会话恢复完成（含用户名拉取）后才允许同步。
@@ -208,7 +218,7 @@ function isConfigured() {
  * 手动同步（设置页点击）不经过 runSync，直接调用 syncNow，不受此开关影响。
  * 其余所有自动触发源（翻页/启动/定时/切前台/网络恢复）都受该开关控制。
  */
-function autoSyncEnabled() {
+function autoSyncEnabled(): boolean {
   const s = useSettingsStore()
   return !!s.autoSync
 }
@@ -219,7 +229,7 @@ function autoSyncEnabled() {
  * 旧的 localStorage 时间戳锁存在读-改-写竞态，且 90s TTL 过期后
  * 慢同步期间其他标签页会并发进入，双写导致云端重复行，故弃用。
  */
-function tryWithLock(fn) {
+function tryWithLock(fn: () => any): Promise<any> {
   if (typeof navigator === 'undefined' || !navigator.locks?.request) {
     return Promise.resolve(fn())
   }
@@ -235,7 +245,7 @@ function tryWithLock(fn) {
  * 未配置 / 正在同步 / 失败退避期内 / 其他标签页正在同步 → 直接跳过。
  * source 用于调试输出，标明本次同步的触发来源。
  */
-async function runSync(source = 'auto') {
+async function runSync(source = 'auto'): Promise<void> {
   if (paused) return
   // 本地数据归属决策未完成：一切后台自动同步静默跳过。
   // 该标记持久化在 localStorage（区别于内存的 paused），弹窗未决时
@@ -254,7 +264,7 @@ async function runSync(source = 'auto') {
         storeState(true, result.message)
         debugLogSync(source, true, result.message, result.detail)
       } catch (error) {
-        const message = error.message || '同步失败'
+        const message = (error as Error)?.message || '同步失败'
         storeState(false, message)
         debugLogSync(source, false, message, null)
       }
@@ -264,25 +274,25 @@ async function runSync(source = 'auto') {
   }
 }
 
-function intervalMs() {
+function intervalMs(): number {
   return AUTO_SYNC_INTERVAL_MIN * 60_000
 }
 
-function clearTimer() {
+function clearTimer(): void {
   if (timer) {
     clearInterval(timer)
     timer = null
   }
 }
 
-function scheduleTimer() {
+function scheduleTimer(): void {
   clearTimer()
   const s = useSettingsStore()
   if (!s.autoSync) return
   timer = setInterval(() => runSync('auto'), intervalMs())
 }
 
-function onVisibility() {
+function onVisibility(): void {
   if (document.visibilityState !== 'visible') return
   const s = useSettingsStore()
   if (!s.autoSync) return
@@ -293,7 +303,7 @@ function onVisibility() {
   }
 }
 
-function onOnline() {
+function onOnline(): void {
   runSync('online')
 }
 
@@ -304,7 +314,7 @@ function onOnline() {
  * 3. 从后台切回前台 / 网络恢复时按需补同步；
  * 4. 自动同步开关或间隔变化时自动重启定时器。
  */
-export function startAutoSync() {
+export function startAutoSync(): void {
   if (started) return
   started = true
 
@@ -331,7 +341,7 @@ export function startAutoSync() {
 }
 
 /** 停止后台自动同步（释放定时器、事件监听与 watcher）。 */
-export function stopAutoSync() {
+export function stopAutoSync(): void {
   started = false
   if (bootDelayTimer) {
     clearTimeout(bootDelayTimer)

@@ -3,6 +3,8 @@ import { ref, computed, watch } from 'vue'
 import { X, LoaderCircle, Trash2, FileText, CheckSquare, Square } from 'lucide-vue-next'
 import { cacheService, articleService } from '../../services/db'
 import { alert, confirmDialog } from '../../services/dialog'
+import { useDialogA11y } from '../../composables/useDialogA11y'
+import { errorText } from '../../services/errors'
 
 const props = defineProps({
   open: { type: Boolean, default: false }
@@ -70,6 +72,23 @@ watch(() => props.open, (open) => {
 
 watch([types, articleScope, selectedArticleIds], refreshStats, { deep: true })
 
+// ---- 关闭守卫 ----
+// 清除进行中禁止一切关闭入口：结果与失败信息只在弹窗内展示，
+// 中途关掉用户就永远看不到清除结果（只能重新打开再清一次）
+function requestClose() {
+  if (clearing.value) return
+  emit('close')
+}
+
+// 弹窗无障碍：Esc 关闭（清除中禁止）、打开时焦点移入、关闭时归还、Tab 循环
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => props.open,
+  onClose: () => emit('close'),
+  panelRef,
+  canClose: () => !clearing.value
+})
+
 function toggleArticle(id) {
   const idx = selectedArticleIds.value.indexOf(id)
   if (idx >= 0) selectedArticleIds.value.splice(idx, 1)
@@ -92,7 +111,7 @@ async function handleClear() {
     refreshStats()
     emit('done')
   } catch (e) {
-    error.value = '清除失败：' + e.message
+    error.value = '清除失败：' + errorText(e, '请重试')
   } finally {
     clearing.value = false
   }
@@ -105,18 +124,24 @@ async function handleClear() {
       <div
         v-if="open"
         class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm"
-        @click="emit('close')"
+        @click="requestClose"
       ></div>
     </Transition>
 
     <Transition name="cache-panel">
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-        <div class="pointer-events-auto w-full max-w-lg max-h-[85vh] flex flex-col bg-white dark:bg-neutral-900 rounded-xl shadow-xl border border-gray-200 dark:border-neutral-800 overflow-hidden">
+        <div
+          ref="panelRef"
+          role="dialog"
+          aria-modal="true"
+          aria-label="清除缓存"
+          class="pointer-events-auto w-full max-w-lg max-h-[85vh] flex flex-col bg-white dark:bg-neutral-900 rounded-xl shadow-xl border border-gray-200 dark:border-neutral-800 overflow-hidden"
+        >
           <!-- 头部 -->
           <div class="relative flex items-center justify-center px-5 py-3 border-b border-gray-100 dark:border-neutral-800 shrink-0">
             <h2 class="text-base font-semibold text-gray-900 dark:text-neutral-100">清除缓存</h2>
             <button
-              @click="emit('close')"
+              @click="requestClose"
               class="absolute right-4 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-gray-400 dark:text-neutral-500 hover:text-gray-600 dark:hover:text-neutral-200 hover:bg-gray-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
               aria-label="关闭"
             >
@@ -233,8 +258,9 @@ async function handleClear() {
           <!-- 底部 -->
           <div class="flex items-center justify-end gap-3 px-5 py-3 border-t border-gray-100 dark:border-neutral-800 shrink-0">
             <button
-              @click="emit('close')"
-              class="px-4 py-2 text-sm text-gray-600 dark:text-neutral-400 border border-gray-300 dark:border-neutral-700 rounded-md hover:bg-gray-50 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+              @click="requestClose"
+              :disabled="clearing"
+              class="px-4 py-2 text-sm text-gray-600 dark:text-neutral-400 border border-gray-300 dark:border-neutral-700 rounded-md hover:bg-gray-50 dark:hover:bg-neutral-800 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               关闭
             </button>

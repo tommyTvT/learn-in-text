@@ -5,7 +5,9 @@ import { useRouter, usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
 import { useArticleStore } from '../../stores/article'
 import { speak } from '../../services/tts'
-import { alert, confirmDialog } from '../../services/dialog'
+import { confirmDialog } from '../../services/dialog'
+import { toast } from '../../services/toast'
+import { errorText } from '../../services/errors'
 import { dbReady } from '../../services/db'
 
 usePageRoute()
@@ -16,14 +18,19 @@ const articleStore = useArticleStore()
 const sortBy = ref('updatedAt')
 const selectedWords = ref([])
 const expandedArticles = ref(new Set())
+// 页面级加载错误（db 未就绪 / 文章列表读取失败）；词库自身的失败原因由 store 记录
+const pageError = ref('')
+const loadError = computed(() => pageError.value || wordStore.loadError)
 
-onMounted(async () => {
+async function loadVocabulary() {
+  pageError.value = ''
   // 等 db schema 就绪再读库：迁移后 ensureSchema 不再是顶层 await（uni 构建不支持），
   // 页面挂载可能早于 dbReady，直接读库存在时序竞态
   try {
     await dbReady
   } catch (e) {
     console.error('[Vocabulary] 数据库未就绪:', e)
+    pageError.value = errorText(e, '本地数据库未就绪，请刷新后重试')
     return
   }
   // App 启动时已通过 wordStore.fetchMarkedWords() 完成一次全量加载，
@@ -34,8 +41,16 @@ onMounted(async () => {
   }
   // 文章列表通常已在首页加载过；为空时才补充加载，避免重复读库
   if (articleStore.articles.length === 0) {
-    await articleStore.fetchArticles()
+    try {
+      await articleStore.fetchArticles()
+    } catch (e) {
+      pageError.value = errorText(e, '文章列表加载失败，请重试')
+    }
   }
+}
+
+onMounted(() => {
+  loadVocabulary()
 })
 
 const allArticles = computed(() => articleStore.articles)
@@ -102,48 +117,89 @@ function toggleSelectWord(id) {
   }
 }
 
-function selectAllVisible() {
-  const allVisibleIds = []
+// 当前可勾选的全部单词 id（与 selectAllVisible 的作用集合一致）。
+// 「全选/取消全选」的文案判据必须与行为判据同源：此前文案比的是去重后的
+// markedWords.length，行为比的是逐文章记录数，两者在多文章重复单词时不一致，
+// 会出现「按钮写全选、点击却清空」的矛盾。
+const allVisibleWordIds = computed(() => {
+  const ids = []
   for (const article of articlesWithWords.value) {
-    const words = getArticleWords(article.id)
-    for (const word of words) {
-      allVisibleIds.push(word.id)
+    for (const word of getArticleWords(article.id)) {
+      ids.push(word.id)
     }
   }
+  return ids
+})
+
+const isAllSelected = computed(() =>
+  allVisibleWordIds.value.length > 0 && selectedWords.value.length === allVisibleWordIds.value.length
+)
+
+function selectAllVisible() {
+  const allVisibleIds = allVisibleWordIds.value
   if (selectedWords.value.length === allVisibleIds.length) {
     selectedWords.value = []
   } else {
-    selectedWords.value = allVisibleIds
+    selectedWords.value = [...allVisibleIds]
   }
 }
+
+// 批量删除执行中标记：避免重复点击导致并发删除
+const deleting = ref(false)
 
 async function deleteSelected() {
-  if (selectedWords.value.length === 0) return
-  if (!await confirmDialog(`确定删除 ${selectedWords.value.length} 个单词？`)) return
+  const count = selectedWords.value.length
+  if (count === 0 || deleting.value) return
+  // 删除按「拼写」生效、且跨文章：同样拼写在其它文章中标记的记录、释义与语境翻译
+  // 会一并删除，确认文案必须说明影响范围（原文案只报个数，会误导用户）
+  if (!await confirmDialog(
+    `确定删除选中的 ${count} 个单词吗？\n\n` +
+    '注意：删除按单词拼写生效，该单词在其它文章中标记的记录、释义与语境翻译也会一并删除，且无法恢复。'
+  )) return
 
-  for (const id of selectedWords.value) {
-    await wordStore.deleteWord(id)
+  deleting.value = true
+  try {
+    await wordStore.deleteWordsByIds(selectedWords.value)
+    selectedWords.value = []
+    await toast('已删除选中单词')
+  } catch (e) {
+    await toast(errorText(e, '删除失败，请重试'), 'error')
+  } finally {
+    deleting.value = false
   }
-  selectedWords.value = []
 }
 
-function exportArticleTxt(articleId, title) {
+async function exportArticleTxt(articleId, title) {
   const words = getArticleWords(articleId)
   const selectedInArticle = words.filter(w => selectedWords.value.includes(w.id))
-  wordStore.exportArticleWordsTxt(articleId, title, selectedInArticle.map(w => w.id))
+  try {
+    wordStore.exportArticleWordsTxt(articleId, title, selectedInArticle.map(w => w.id))
+    await toast('已导出该文章单词')
+  } catch (e) {
+    await toast(errorText(e, '导出失败，请重试'), 'error')
+  }
 }
 
-function exportSelectedTxt() {
+async function exportSelectedTxt() {
   if (selectedWords.value.length === 0) return
-  wordStore.exportSelectedWordsTxt(selectedWords.value)
+  try {
+    await wordStore.exportSelectedWordsTxt(selectedWords.value)
+    await toast('已导出选中单词')
+  } catch (e) {
+    await toast(errorText(e, '导出失败，请重试'), 'error')
+  }
 }
 
-function goToGenerate() {
+async function goToGenerate() {
   if (selectedWords.value.length === 0) return
-  const spellings = selectedWords.value.map(id => {
-    const word = wordStore.markedWords.find(w => w.id === id)
-    return word ? word.word : ''
-  }).filter(Boolean)
+  // 按 id 全集解析拼写：勾选来源是 articleWordsMap（每篇文章一条记录），
+  // 用去重后的 markedWords 回查会丢掉较旧记录的 id，导致静默丢词
+  const words = await wordStore.getWordsByIds(selectedWords.value)
+  const spellings = [...new Set(words.map(w => w.word))]
+  if (spellings.length === 0) {
+    await toast('选中的单词已不在词库中，请重新选择', 'error')
+    return
+  }
   router.push({ path: '/generate', query: { words: spellings.join(',') } })
 }
 
@@ -186,11 +242,11 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
           @click="selectAllVisible"
           class="px-3 py-1 text-sm bg-gray-100 dark:bg-neutral-800 text-gray-700 dark:text-neutral-300 rounded-md hover:bg-gray-200 dark:hover:bg-neutral-700"
         >
-          {{ selectedWords.length === wordStore.markedWords.length ? '取消全选' : '全选' }}
+          {{ isAllSelected ? '取消全选' : '全选' }}
         </button>
         <button
           @click="deleteSelected"
-          :disabled="selectedWords.length === 0"
+          :disabled="selectedWords.length === 0 || deleting"
           class="px-3 py-1 text-sm bg-red-100! dark:bg-neutral-800! text-red-700! dark:text-neutral-300! rounded-md hover:bg-red-200! dark:hover:bg-neutral-700! disabled:opacity-50 disabled:cursor-not-allowed"
         >
           删除选中 ({{ selectedWords.length }})
@@ -221,7 +277,20 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
       </div>
     </div>
 
-    <div v-if="articlesWithWords.length === 0" class="text-center py-12 text-gray-500 dark:text-neutral-400">
+    <!-- 三态：加载中 / 加载失败（可重试）/ 空数据，避免把失败显示成「还没有标记的单词」 -->
+    <div v-if="wordStore.loading" class="text-center py-12 text-gray-500 dark:text-neutral-400">
+      加载中...
+    </div>
+    <div v-else-if="loadError" class="text-center py-12">
+      <p class="text-sm text-red-500 dark:text-red-400">{{ loadError }}</p>
+      <button
+        @click="loadVocabulary"
+        class="mt-3 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+      >
+        重试
+      </button>
+    </div>
+    <div v-else-if="articlesWithWords.length === 0" class="text-center py-12 text-gray-500 dark:text-neutral-400">
       还没有标记的单词
     </div>
 
@@ -276,10 +345,17 @@ const totalMarkedWords = computed(() => wordStore.markedWords.length)
 
         <div v-if="isArticleExpanded(article.id)" class="px-4 sm:px-5 pb-3 border-t border-gray-100 dark:border-neutral-800">
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
+            <!-- 单词卡可点选：补 checkbox 语义与键盘触发，否则键盘用户无法勾选单词 -->
             <div
               v-for="word in getArticleWords(article.id)"
               :key="word.id"
+              role="checkbox"
+              tabindex="0"
+              :aria-checked="selectedWords.includes(word.id)"
+              :aria-label="word.word"
               @click="toggleSelectWord(word.id)"
+              @keydown.enter.prevent="toggleSelectWord(word.id)"
+              @keydown.space.prevent="toggleSelectWord(word.id)"
               :class="[
                 'rounded-lg border p-3 cursor-pointer transition-all',
                 selectedWords.includes(word.id)

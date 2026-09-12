@@ -14,6 +14,7 @@ import SelectionPopup from '../../components/Word/SelectionPopup.vue'
 import SelectionChatModal from '../../components/Word/SelectionChatModal.vue'
 import EditArticleModal from '../../components/Article/EditArticleModal.vue'
 import { alert, confirmDialog } from '../../services/dialog'
+import { errorText } from '../../services/errors'
 
 const route = useRoute()
 usePageRoute()
@@ -35,7 +36,11 @@ const articleWords = ref([])
 const localMarks = ref(new Set())
 const activeOccKey = ref(null)
 const contextTranslation = ref(null)
-const contextError = ref(false)
+// 错误态存「可直接展示的原因文案」，空串表示无错误（原为布尔值，无法说明失败原因）
+const contextError = ref('')
+
+// 首屏加载失败原因（空串表示无错误）：读取异常时不再永久停在「加载中...」
+const loadError = ref('')
 
 const isViewMode = computed(() => route.query.mode === 'view')
 const stickyHighlights = ref(new Map())
@@ -64,7 +69,7 @@ const selectionContext = ref('')
 const showSelectionPopup = ref(false)
 const selectionTranslation = ref(null)
 const loadingSelection = ref(false)
-const selectionError = ref(false)
+const selectionError = ref('')
 let selectionRequestId = 0
 const showSelectionChat = ref(false)
 let selectionChangeTimer = null
@@ -94,11 +99,21 @@ async function onArticleSaved() {
 const batchProgress = ref({ completed: 0, total: 0, running: false, error: null, failedWords: [] })
 let batchAbortController = null
 
+// 取消批量生成：中止在途请求并立即复位进度。
+// 已生成的词义不回滚；此后点击单词走按需生成，与正常流程一致
+function cancelBatchGenerate() {
+  if (batchAbortController) {
+    batchAbortController.abort()
+    batchAbortController = null
+  }
+  batchProgress.value.running = false
+}
+
 const articleId = computed(() => parseInt(route.params.id))
 
 let autoGenerateTimer = null
 
-onMounted(async () => {
+onMounted(() => {
   // ⚠️ 事件监听与会话恢复必须同步注册在任何 await 之前。
   // 原实现把这些放在 await 链之后：数据加载抛错或耗时都会让 mouseup/selectionchange
   // 监听器漏注册，表现为「选区能高亮但划词气泡不出现」，而点击查词（模板 @click）不受影响。
@@ -120,7 +135,24 @@ onMounted(async () => {
   }
   window.addEventListener('scroll', handleScrollSave, { passive: true })
 
-  article.value = await articleStore.fetchArticle(articleId.value)
+  initArticle()
+})
+
+/**
+ * 首屏加载：抽成可重试函数。
+ * 此前 fetchArticle 在 try 之外且 store 不捕获异常，读库失败时
+ * onMounted 的 promise 被 reject、article 恒为 null，页面永久停在
+ * 「加载中...」，既无提示也没有重试入口。
+ */
+async function initArticle() {
+  loadError.value = ''
+  try {
+    article.value = await articleStore.fetchArticle(articleId.value)
+  } catch (e) {
+    console.error('[Reader] 文章读取失败:', e)
+    loadError.value = errorText(e, '文章加载失败，请重试')
+    return
+  }
   if (!article.value) {
     await alert('文章不存在')
     router.push('/')
@@ -142,7 +174,7 @@ onMounted(async () => {
   } catch (error) {
     console.error('[Reader] 文章数据加载失败:', error)
   }
-})
+}
 
 onUnmounted(() => {
   if (autoGenerateTimer) {
@@ -478,7 +510,7 @@ async function loadWordDetails(word, occKey) {
   const requestId = ++wordDetailRequestId
   loadingContext.value = false
   contextTranslation.value = null
-  contextError.value = false
+  contextError.value = ''
   wordInfo.value = null
   // 重置上一次请求遗留的 loading：前一个单词的 AI 生成在途时切到新词，
   // 其 finally 会因竞态守卫跳过清理，不重置会永久转圈
@@ -545,7 +577,7 @@ async function generateBasicInfo(word, requestId) {
     wordInfo.value = await wordStore.getOrCreateWord(word, articleId.value)
   } catch (error) {
     if (rid === wordDetailRequestId) {
-      await alert('AI生成失败: ' + error.message)
+      await alert(errorText(error, 'AI 生成失败，请稍后重试'))
     }
   } finally {
     if (rid === wordDetailRequestId) {
@@ -566,7 +598,7 @@ async function loadContextTranslation(word, occKey, requestId) {
     await contextTranslationService.set(wordData.id, articleId.value, occKey, '')
   }
 
-  contextError.value = false
+  contextError.value = ''
   loadingContext.value = true
   try {
     // sentence：目标词所在单句（限定释义范围）；context：前后各多带一句，供 AI 理解语境
@@ -579,9 +611,9 @@ async function loadContextTranslation(word, occKey, requestId) {
     await wordStore.updateContextTranslation(wordData.id, articleId.value, occKey, result.contextTranslation)
     contextTranslation.value = result.contextTranslation
   } catch (error) {
-    console.error('上下文释义生成失败:', error.message)
+    console.error('上下文释义生成失败:', error)
     if (requestId === wordDetailRequestId) {
-      contextError.value = true
+      contextError.value = errorText(error, '释义生成失败，请重试')
     }
   } finally {
     if (requestId === wordDetailRequestId) {
@@ -600,7 +632,7 @@ function closePopup() {
   selectedOccKey.value = null
   wordInfo.value = null
   contextTranslation.value = null
-  contextError.value = false
+  contextError.value = ''
   activeOccKey.value = null
   // 弹窗即将卸载：若选区残留在弹窗 DOM 内，卸载后浏览器不会自动重置 Selection，
   // 会拦截后续单词点击（黄色标记无法取消），这里趁节点还在时主动清除
@@ -929,7 +961,7 @@ function openSelectionPopup(text) {
   // 同步备好上下文：弹窗挂载即触发句子成分解析，解析需要用它消歧
   selectionContext.value = article.value ? getSelectionContext(article.value.content, text) : ''
   selectionTranslation.value = null
-  selectionError.value = false
+  selectionError.value = ''
   showSelectionPopup.value = true
   loadSelectionTranslation(text)
 }
@@ -938,7 +970,7 @@ async function loadSelectionTranslation(text) {
   const requestId = ++selectionRequestId
   const hash = selectionHash(text)
   loadingSelection.value = true
-  selectionError.value = false
+  selectionError.value = ''
   selectionTranslation.value = null
   try {
     const cached = await selectionTranslationService.get(articleId.value, hash).catch(() => null)
@@ -964,9 +996,9 @@ async function loadSelectionTranslation(text) {
     await selectionTranslationService.set(articleId.value, hash, text, result.translation)
     selectionTranslation.value = result.translation
   } catch (error) {
-    console.error('划词翻译生成失败:', error.message)
+    console.error('划词翻译生成失败:', error)
     if (requestId === selectionRequestId) {
-      selectionError.value = true
+      selectionError.value = errorText(error, '翻译失败，请重试')
     }
   } finally {
     if (requestId === selectionRequestId) {
@@ -983,7 +1015,7 @@ function retrySelectionTranslation() {
 function closeSelectionPopup() {
   showSelectionPopup.value = false
   selectionTranslation.value = null
-  selectionError.value = false
+  selectionError.value = ''
   loadingSelection.value = false
 }
 
@@ -1182,6 +1214,7 @@ const renderedParagraphs = computed(() => {
           @click="showEditModal = true"
           class="text-gray-400 hover:text-blue-500"
           title="编辑文章"
+          aria-label="编辑文章"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -1213,9 +1246,18 @@ const renderedParagraphs = computed(() => {
 
       <div v-if="batchProgress.running || batchProgress.failedWords.length" class="mb-4">
         <template v-if="batchProgress.running">
-          <div class="flex justify-between text-sm text-gray-600 dark:text-neutral-400 mb-1">
-            <span>正在生成词义，完成后可点击单词（{{ batchProgress.completed }} / {{ batchProgress.total }}）</span>
-            <span>{{ batchProgress.completed }} / {{ batchProgress.total }}</span>
+          <div class="flex justify-between items-center text-sm text-gray-600 dark:text-neutral-400 mb-1">
+            <span>正在生成词义，完成后可点击单词</span>
+            <div class="flex items-center gap-3">
+              <span>{{ batchProgress.completed }} / {{ batchProgress.total }}</span>
+              <!-- 批量生成可能持续较久，提供取消入口避免只能等或离开页面 -->
+              <button
+                @click="cancelBatchGenerate"
+                class="text-xs text-gray-500 dark:text-neutral-400 hover:text-red-600 dark:hover:text-red-400 underline"
+              >
+                取消
+              </button>
+            </div>
           </div>
           <div class="w-full bg-gray-200 dark:bg-neutral-700 rounded-full h-2">
             <div
@@ -1239,11 +1281,17 @@ const renderedParagraphs = computed(() => {
           <p class="mb-4 last:mb-0">
             <template v-for="(part, index) in paragraphParts" :key="index">
               <span v-if="part.type === 'text'">{{ part.content }}</span>
+              <!-- 单词是核心交互：补可聚焦与键盘触发，否则键盘/读屏用户完全无法查词 -->
               <span
                 v-else
                 :data-p="paragraphIndex"
                 :data-i="index"
+                role="button"
+                tabindex="0"
+                :aria-label="part.word"
                 @click="handleWordClick($event, part)"
+                @keydown.enter.prevent="handleWordClick($event, part)"
+                @keydown.space.prevent="handleWordClick($event, part)"
                 :class="[
                   'transition-colors rounded px-0.5',
                   batchProgress.running
@@ -1331,6 +1379,16 @@ const renderedParagraphs = computed(() => {
     />
   </div>
 
+  <!-- 加载失败：与「加载中」区分，并给出重试入口 -->
+  <div v-else-if="loadError" class="text-center py-12">
+    <p class="text-sm text-red-500 dark:text-red-400">{{ loadError }}</p>
+    <button
+      @click="initArticle"
+      class="mt-3 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+    >
+      重试
+    </button>
+  </div>
   <div v-else class="text-center py-12 text-gray-500 dark:text-neutral-400">
     加载中...
   </div>

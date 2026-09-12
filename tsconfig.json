@@ -1,37 +1,52 @@
 {
-  // 不再 extends "@vue/tsconfig/tsconfig.json"（v0.1.3）：
-  // 该预设包含 TypeScript 5.5 已移除的 importsNotUsedAsValues / preserveValueImports，
-  // 会被新版 TS 报错。此处将其等价配置内联到下方 compilerOptions 中。
+  // 配置自持：不再 extends 第三方预设。
+  // 原 @vue/tsconfig@0.1.3 含 TS 5.5 已移除的 importsNotUsedAsValues /
+  // preserveValueImports，只要通过 extends 继承就会被新版 TS 持续报错，
+  // 且子配置无法覆盖掉父配置中的已删除选项，故在此完整声明。
   "compilerOptions": {
-    "sourceMap": true,
+    // ---------- 语言 / 模块 ----------
+    "target": "ESNext",
+    "module": "ESNext",
+    // 面向 Vite：按构建器规则解析（读取 package.json exports、允许无扩展名导入）
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "lib": ["ESNext", "DOM"],
+    // Vue 项目必需：JSX 交由 vue-tsc / 编译器处理
+    "jsx": "preserve",
+
+    // ---------- 类型检查 ----------
+    // 只做类型检查、不产出文件：产物由 Vite/esbuild 生成。
+    // 必须开启，否则在 allowJs 下 TS 会认为要回写并覆盖 src 下的 .js 输入（TS5055）。
+    "noEmit": true,
+    "strict": true,
+    // strict 已包含 noImplicitThis，显式声明以保证关闭 strict 时仍生效
+    "noImplicitThis": true,
+    // Vite 要求：每个文件必须是可独立转译的模块
+    "isolatedModules": true,
+    // TS 5.0+ 官方替代项，接替已移除的 preserveValueImports /
+    // importsNotUsedAsValues：类型导入必须写 `import type`，且导入行为与转译结果一致
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+
+    // 本项目 SFC 的 <script> 全部是 JS（无 lang="ts"），vue-tsc 会为它们生成
+    // .vue.js 虚拟文件；未开启 allowJs 时会整片报 TS6504。此处只「允许」不「检查」
+    // （checkJs 保持 false），避免把 JS 源码当强类型代码逐行报错。
+    "allowJs": true,
+    "checkJs": false,
+    // 迁移后的 .ts 不留死代码；下划线前缀参数由 noUnusedParameters 豁免
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // ---------- 路径 / 类型 ----------
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     },
-    "lib": ["esnext", "dom"],
-    "types": ["@dcloudio/types"],
-
-    // ===== 以下为原 @vue/tsconfig 基础预设的等价配置（去掉已删除选项后内联）=====
-    "module": "ESNext",
-    "moduleResolution": "Node",
-    "resolveJsonModule": true,
-    "useDefineForClassFields": true,
-    // Vue 项目必需：JSX 交由 vue-tsc / 编译器处理
-    "jsx": "preserve",
-    // noImplicitThis 已包含在 strict 中，此处显式声明以保证关闭 strict 时仍生效
-    "noImplicitThis": true,
-    "strict": true,
-    // Vite 要求：每个文件必须是可独立转译的模块
-    "isolatedModules": true,
-    // 原 `preserveValueImports` + `importsNotUsedAsValues: "error"` 的语义在 TS 5.x
-    // 由 `verbatimModuleSyntax` 承担；本工程本地 TS 为 4.9（不识别该选项），
-    // 且导入语法已统一使用 `import type`，故此处直接移除这两个已废弃选项。
-    // 若后续升级到 TypeScript >= 5.0，可在此处补上： "verbatimModuleSyntax": true
-    "target": "ESNext",
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true
+    "types": ["@dcloudio/types"]
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"]
 }
 

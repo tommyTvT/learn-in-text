@@ -1,8 +1,10 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { extractArticleFromImages, IMAGE_TOKENS_BUDGET } from '../../services/ai'
 import { prepareImageForAI } from '../../services/image'
 import { pickFiles } from '../../services/filePicker'
+import { useDialogA11y } from '../../composables/useDialogA11y'
+import { errorText } from '../../services/errors'
 
 const props = defineProps({
   open: {
@@ -74,6 +76,13 @@ function removeImage(index) {
 }
 
 // ---- AI 识别并提取文章 ----
+// 识别中允许取消：abort 会中止在途 fetch，避免无谓的 token 消耗与等待
+let recognizeCtrl = null
+
+function cancelRecognize() {
+  recognizeCtrl?.abort()
+}
+
 async function extractArticle() {
   if (!imageFiles.value.length || recognizingImage.value) return
 
@@ -81,14 +90,18 @@ async function extractArticle() {
   imageError.value = ''
   imageProgressMax.value = IMAGE_TOKENS_BUDGET * imageFiles.value.length
   imageProgress.value = 0
+  // 用局部变量持有 controller：finally 会把模块变量置 null，后续不能再读它
+  const ctrl = new AbortController()
+  recognizeCtrl = ctrl
 
   try {
     // 本地预处理所有图片，然后一次请求携带全部图片识别（跨图拼接由模型完成）
     const dataUrls = await Promise.all(imageFiles.value.map(prepareImageForAI))
     const result = await extractArticleFromImages(dataUrls, (currentTokens) => {
       imageProgress.value = currentTokens
-    })
+    }, ctrl.signal)
 
+    if (ctrl.signal.aborted) return // 已取消：不回传结果
     if (!result.content) {
       imageError.value = '未能从图片中识别出文章内容'
       return
@@ -97,8 +110,14 @@ async function extractArticle() {
     emit('extracted', { title: result.title, description: result.description, content: result.content })
     emit('close')
   } catch (e) {
-    imageError.value = e.message
+    if (ctrl.signal.aborted || e?.name === 'AbortError') {
+      return // 用户主动取消：静默复位，不当作错误展示
+    }
+    // 归一化：reject 值可能是字符串/undefined，直接取 .message 会得到 undefined，
+    // 错误区（v-if="imageError"）随之不渲染，用户看不到任何失败原因
+    imageError.value = errorText(e, '识别失败，请重试')
   } finally {
+    recognizeCtrl = null
     imageProgress.value = imageProgressMax.value
     recognizingImage.value = false
   }
@@ -108,12 +127,6 @@ async function extractArticle() {
 function handleOverlayClick() {
   if (recognizingImage.value) return
   emit('close')
-}
-
-function handleEsc(e) {
-  if (e.key === 'Escape' && props.open && !recognizingImage.value) {
-    emit('close')
-  }
 }
 
 watch(() => props.open, (val) => {
@@ -128,8 +141,15 @@ watch(() => props.open, (val) => {
   }
 })
 
-onMounted(() => window.addEventListener('keydown', handleEsc))
-onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
+// 弹窗无障碍：Esc 关闭（识别进行中禁止）、打开时焦点移入、关闭时归还、Tab 循环
+// （composable 内部已做非 H5 端守卫，替代此前无守卫的 window 监听）
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => props.open,
+  onClose: () => emit('close'),
+  panelRef,
+  canClose: () => !recognizingImage.value
+})
 </script>
 
 <template>
@@ -144,7 +164,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
 
     <Transition name="img-panel">
       <div v-if="open" class="fixed inset-0 z-50">
-        <div class="relative h-full w-full bg-white dark:bg-neutral-900 flex flex-col overflow-hidden">
+        <div
+          ref="panelRef"
+          role="dialog"
+          aria-modal="true"
+          aria-label="拍照导入文章"
+          class="relative h-full w-full bg-white dark:bg-neutral-900 flex flex-col overflow-hidden"
+        >
           <div class="sm:hidden pt-[env(safe-area-inset-top)] bg-white dark:bg-neutral-900"></div>
 
           <!-- 头部 -->
@@ -203,6 +229,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
                     :disabled="recognizingImage"
                     class="absolute -top-2 -right-2 w-5 h-5 flex items-center justify-center rounded-full bg-gray-700 text-white hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed"
                     title="移除"
+                    aria-label="移除图片"
                   >
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -223,6 +250,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
                 <p class="mt-1.5 text-xs text-gray-500 dark:text-neutral-400">
                   识别进度 {{ imageProgress }} / {{ imageProgressMax }} tokens（共 {{ imageFiles.length }} 张图片）
                 </p>
+                <!-- 识别中提供取消入口：abort 中止在途请求，无需等满超时 -->
+                <button
+                  type="button"
+                  @click="cancelRecognize"
+                  class="mt-2 w-full px-3 py-1.5 text-xs text-gray-600 dark:text-neutral-300 border border-gray-300 dark:border-neutral-600 rounded-md hover:bg-gray-50 dark:hover:bg-neutral-700 transition-colors"
+                >
+                  取消识别
+                </button>
               </div>
 
               <p v-if="imageError" class="text-sm text-red-600 dark:text-red-400">{{ imageError }}</p>

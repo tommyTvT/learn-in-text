@@ -10,7 +10,16 @@
  * 注意：必须在用户手势的同步调用栈内调用（按钮 @click 直接调用即可），
  * 否则浏览器会拦截文件选择弹窗。
  */
-export function pickFiles({ accept = '', multiple = false } = {}) {
+
+/** 文件选择选项 */
+export interface PickFilesOptions {
+  /** 与原生 input 的 accept 一致（如 image/*） */
+  accept?: string
+  /** 是否允许多选 */
+  multiple?: boolean
+}
+
+export function pickFiles({ accept = '', multiple = false }: PickFilesOptions = {}): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
@@ -21,7 +30,7 @@ export function pickFiles({ accept = '', multiple = false } = {}) {
     input.style.left = '-9999px'
     input.style.top = '0'
     input.style.opacity = '0'
-    const cleanup = (files) => {
+    const cleanup = (files: File[]) => {
       if (input.parentNode) input.parentNode.removeChild(input)
       resolve(files)
     }

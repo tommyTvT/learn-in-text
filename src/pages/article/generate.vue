@@ -6,7 +6,9 @@ import { generateArticle, generateArticleMeta, extractTaskFromImages, IMAGE_TOKE
 import { prepareImageForAI } from '../../services/image'
 import { useArticleStore } from '../../stores/article'
 import { useWordStore } from '../../stores/word'
+import { toast } from '../../services/toast'
 import { alert, confirmDialog } from '../../services/dialog'
+import { errorText } from '../../services/errors'
 import { pickFiles } from '../../services/filePicker'
 
 const route = useRoute()
@@ -43,6 +45,14 @@ const wordCountMax = computed(() => (mode.value === 'essay' ? 600 : 2000))
 
 const generating = ref(false)
 const generatingTitle = ref(false)
+// 保存中标记：防止连点产生重复文章（createArticle 无幂等保护）
+const saving = ref(false)
+// 生成中允许取消：abort 中止在途 fetch，不必等满超时
+let generateCtrl = null
+
+function cancelGenerate() {
+  generateCtrl?.abort()
+}
 const error = ref('')
 const result = ref(null)
 const resultTitle = ref('')
@@ -60,14 +70,10 @@ onMounted(async () => {
 })
 
 // 返回上一页：从主页进入退回主页，从词库进入退回词库。
-// 若无历史可回退（如直接访问该页），根据是否携带 words 参数判断来源（词库进入会带，主页进入不带）
+// 无历史可回退（如直接访问该页）时按来源兜底：词库进入会带 words 参数，主页进入不带。
+// 页面栈判断与兜底统一由 routerShim.back 处理，不依赖 window（非 H5 端无 window）。
 function goBack() {
-  const historyState = window.history.state
-  if (historyState && historyState.back) {
-    router.back()
-  } else {
-    router.push(route.query.words ? '/vocabulary' : '/')
-  }
+  router.back(route.query.words ? '/vocabulary' : '/')
 }
 
 function switchMode(newMode) {
@@ -162,7 +168,7 @@ async function handleTaskImageFiles(files) {
       words.value = [...new Set([...words.value, ...merged.words])]
     }
   } catch (e) {
-    taskImageError.value = e.message
+    taskImageError.value = errorText(e, '题目要求识别失败，请重试')
   } finally {
     taskProgress.value = taskProgressMax.value
     recognizingTask.value = false
@@ -178,6 +184,8 @@ async function generate() {
   }
   error.value = ''
   generating.value = true
+  const ctrl = new AbortController()
+  generateCtrl = ctrl
   try {
     const content = await generateArticle(words.value, {
       mode: mode.value,
@@ -187,14 +195,22 @@ async function generate() {
       wordCount: wordCount.value,
       customDescription: customDescription.value.trim(),
       sourceArticle: sourceArticle.value.trim()
-    })
+    }, ctrl.signal)
+    if (ctrl.signal.aborted) return
     result.value = content.trim()
     resultTitle.value = `AI生成文章 - ${new Date().toLocaleDateString('zh-CN')}`
     resultDescription.value = ''
     autoGenerateMeta()
   } catch (e) {
-    error.value = e.message
+    if (ctrl.signal.aborted || e?.name === 'AbortError') {
+      error.value = '已取消生成'
+      return
+    }
+    // 归一化文案：此前直接透出 e.message，超时/中断时用户会看到浏览器英文原文，
+    // 而未配置 AI 接口这类可行动提示反被淹没
+    error.value = errorText(e, '生成失败，请稍后重试')
   } finally {
+    generateCtrl = null
     generating.value = false
   }
 }
@@ -215,7 +231,7 @@ async function autoGenerateMeta() {
       resultDescription.value = meta.description
     }
   } catch (e) {
-    console.error('AI标题/描述生成失败:', e.message)
+    console.error('AI标题/描述生成失败:', e)
   } finally {
     generatingTitle.value = false
   }
@@ -227,16 +243,21 @@ async function regenerateTitle() {
 }
 
 async function saveArticle() {
-  if (!result.value) return
+  // 提交守卫：创建文章没有幂等保护，连点「保存并阅读」会产生重复文章
+  if (!result.value || saving.value) return
+  saving.value = true
   try {
     const article = await articleStore.createArticle({
       title: resultTitle.value.trim() || 'AI生成文章',
       description: resultDescription.value.trim(),
       content: result.value
     })
+    await toast('文章已保存')
     router.push(`/reader/${article.id}`)
   } catch (e) {
-    await alert('保存失败: ' + e.message)
+    await alert('保存失败: ' + errorText(e, '未知错误'))
+  } finally {
+    saving.value = false
   }
 }
 </script>
@@ -469,6 +490,14 @@ async function saveArticle() {
           >
             {{ generating ? '生成中...' : '生成文章' }}
           </button>
+          <!-- 生成中提供取消入口：abort 中止在途请求，避免无谓等待 -->
+          <button
+            v-if="generating"
+            @click="cancelGenerate"
+            class="w-full mt-2 py-2 px-4 rounded-md border border-gray-300 dark:border-neutral-600 text-gray-600 dark:text-neutral-300 text-sm hover:bg-gray-50 dark:hover:bg-neutral-800 transition-colors"
+          >
+            取消生成
+          </button>
         </div>
       </div>
 
@@ -527,9 +556,10 @@ async function saveArticle() {
           <div class="flex flex-col sm:flex-row gap-2 sm:gap-3">
             <button
               @click="saveArticle"
-              class="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              :disabled="saving"
+              class="flex-1 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              保存并阅读
+              {{ saving ? '保存中...' : '保存并阅读' }}
             </button>
             <button
               @click="generate"

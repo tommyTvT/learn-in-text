@@ -1,4 +1,24 @@
-export const commonWordDefinitions = {
+/** 内置常用词表条目 */
+export interface CommonWordDefinition {
+  phonetic: string
+  definition: string
+}
+
+/** 句子区间：start / end 为原文下标，text 为去空白后的句子文本 */
+interface SentenceRange {
+  start: number
+  end: number
+  text: string
+}
+
+/** 文章解析结果 */
+export interface ParsedArticle {
+  sentences: string[]
+  paragraphs: string[]
+  words: string[]
+}
+
+export const commonWordDefinitions: Record<string, CommonWordDefinition> = {
   'a': { phonetic: '/ə/', definition: 'art. 一个' },
   'an': { phonetic: '/ən/', definition: 'art. 一个' },
   'the': { phonetic: '/ðə/', definition: 'art. 这个；那个' },
@@ -59,7 +79,6 @@ export const commonWordDefinitions = {
   'and': { phonetic: '/ænd/', definition: 'conj. 和' },
   'but': { phonetic: '/bʌt/', definition: 'conj. 但是' },
   'or': { phonetic: '/ɔːr/', definition: 'conj. 或者' },
-  'not': { phonetic: '/nɒt/', definition: 'adv. 不' },
   'so': { phonetic: '/soʊ/', definition: 'adv./conj. 所以' },
   'if': { phonetic: '/ɪf/', definition: 'conj. 如果' },
   'then': { phonetic: '/ðen/', definition: 'adv. 然后' },
@@ -104,7 +123,6 @@ export const commonWordDefinitions = {
   'through': { phonetic: '/θruː/', definition: 'prep. 穿过' },
   'during': { phonetic: '/ˈdʊrɪŋ/', definition: 'prep. 在…期间' },
   'without': { phonetic: '/wɪˈðaʊt/', definition: 'prep. 没有' },
-  'again': { phonetic: '/əˈɡen/', definition: 'adv. 再次' },
   'back': { phonetic: '/bæk/', definition: 'adv./n. 回来；后面' },
   'well': { phonetic: '/wel/', definition: 'adv. 好' },
   'right': { phonetic: '/raɪt/', definition: 'adj./n. 正确的；权利' },
@@ -158,7 +176,7 @@ export const commonWordDefinitions = {
   'again': { phonetic: '/əˈɡen/', definition: 'adv. 再次' }
 }
 
-const commonWords = new Set([
+const commonWords = new Set<string>([
   'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
   'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
   'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
@@ -177,7 +195,7 @@ const commonWords = new Set([
   'since', 'so that', 'rather', 'than', 'whether'
 ])
 
-export function splitParagraphs(text) {
+export function splitParagraphs(text: string): string[] {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   return normalized
     .split('\n')
@@ -185,9 +203,9 @@ export function splitParagraphs(text) {
     .filter(Boolean)
 }
 
-export function parseArticle(text) {
+export function parseArticle(text: string): ParsedArticle {
   const sentences = text.match(/[^.!?]+[.!?]+/g) || [text]
-  const words = []
+  const words: string[] = []
   const wordRegex = /[a-zA-Z]+(?:'[a-zA-Z]+)?/g
 
   let match
@@ -205,9 +223,9 @@ export function parseArticle(text) {
   }
 }
 
-export function getWordContext(text, word, maxWords = 0, occurrence = 0) {
+export function getWordContext(text: string, word: string, maxWords = 0, occurrence = 0): string {
   const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
-  let match
+  let match: RegExpExecArray | null
   let count = 0
   let wordIndex = -1
   while ((match = wordRegex.exec(text)) !== null) {
@@ -256,9 +274,14 @@ export const SENTENCE_BOUNDARY_REGEX = /[.!?]+["')\]]*(?=\s|$)|[.!?]+["')\]]+(?=
 // 提取目标词所在句子及前后语境，用于“在文中”释义：
 // sentence 为目标词所在的单句（限定释义所依据的句子，保证解释贴合此处用法），
 // context 额外带上前后各 extraSentences 句（传给 AI 帮助其贴合语境理解）
-export function getWordSentenceWithContext(text, word, occurrence = 0, extraSentences = 1) {
+export function getWordSentenceWithContext(
+  text: string,
+  word: string,
+  occurrence = 0,
+  extraSentences = 1
+): { sentence: string; context: string } {
   const wordRegex = new RegExp(`\\b${word}\\b`, 'gi')
-  let match
+  let match: RegExpExecArray | null
   let count = 0
   let wordIndex = -1
   while ((match = wordRegex.exec(text)) !== null) {
@@ -272,9 +295,9 @@ export function getWordSentenceWithContext(text, word, occurrence = 0, extraSent
 
   // 共享的带 g 标志正则有 lastIndex 状态，使用前重置
   SENTENCE_BOUNDARY_REGEX.lastIndex = 0
-  const sentences = []
+  const sentences: SentenceRange[] = []
   let start = 0
-  let b
+  let b: RegExpExecArray | null
   while ((b = SENTENCE_BOUNDARY_REGEX.exec(text)) !== null) {
     const end = b.index + b[0].length
     const piece = text.slice(start, end).trim()
@@ -297,7 +320,7 @@ export function getWordSentenceWithContext(text, word, occurrence = 0, extraSent
 }
 
 /** 转义正则元字符：词表可能含 ' - 等字符，拼入 \b词\b 前需转义避免正则异常 */
-function escapeRegExp(text) {
+function escapeRegExp(text: string): string {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
@@ -310,16 +333,19 @@ function escapeRegExp(text) {
  * @param {string[]} words 待分组单词（通常为 parseArticle 得到的去重词表）
  * @returns {Array<{ sentence: string, words: string[] }>}
  */
-export function groupWordsBySentence(text, words) {
+export function groupWordsBySentence(
+  text: string,
+  words: string[]
+): Array<{ sentence: string; words: string[] }> {
   const source = String(text || '')
   const list = Array.isArray(words) ? words : []
   if (!source || !list.length) return []
 
   // 一次性切分全文，得到按位置升序排列的句子区间（与 getWordSentenceWithContext 同规则）
   SENTENCE_BOUNDARY_REGEX.lastIndex = 0
-  const sentences = []
+  const sentences: SentenceRange[] = []
   let start = 0
-  let b
+  let b: RegExpExecArray | null
   while ((b = SENTENCE_BOUNDARY_REGEX.exec(source)) !== null) {
     const end = b.index + b[0].length
     const piece = source.slice(start, end).trim()
@@ -333,7 +359,7 @@ export function groupWordsBySentence(text, words) {
   if (!sentences.length) return [{ sentence: '', words: [...list] }]
 
   // 句子区间按 start 升序：二分查找包含目标下标的句子
-  const findSentenceIndex = (index) => {
+  const findSentenceIndex = (index: number) => {
     let lo = 0
     let hi = sentences.length - 1
     let found = -1
@@ -349,12 +375,12 @@ export function groupWordsBySentence(text, words) {
     return found >= 0 && index < sentences[found].end ? found : -1
   }
 
-  const grouped = new Map() // 句子下标 → 该句中的单词（保留首次出现顺序）
-  const fallback = []       // 定位失败的单词
+  const grouped = new Map<number, string[]>() // 句子下标 → 该句中的单词（保留首次出现顺序）
+  const fallback: string[] = []       // 定位失败的单词
   for (const raw of list) {
     const word = String(raw || '').trim()
     if (!word) continue
-    let match = null
+    let match: RegExpExecArray | null = null
     try {
       match = new RegExp(`\\b${escapeRegExp(word)}\\b`, 'i').exec(source)
     } catch {
@@ -366,13 +392,13 @@ export function groupWordsBySentence(text, words) {
       continue
     }
     if (!grouped.has(idx)) grouped.set(idx, [])
-    const bucket = grouped.get(idx)
+    const bucket = grouped.get(idx)!
     if (!bucket.includes(word)) bucket.push(word)
   }
 
   const result = [...grouped.keys()]
     .sort((a, b) => a - b)
-    .map(idx => ({ sentence: sentences[idx].text, words: grouped.get(idx) }))
+    .map(idx => ({ sentence: sentences[idx].text, words: grouped.get(idx)! }))
   // 兜底分组置于末尾：调用方对其回退到旧的「50 词窗口」上下文
   if (fallback.length) result.push({ sentence: '', words: fallback })
   return result
@@ -380,13 +406,13 @@ export function groupWordsBySentence(text, words) {
 
 // 划词翻译：选中文本的规范化（小写 + 空白折叠 + trim），
 // 兼容跨段落选择时 selection.toString() 与原文空白形态不一致的差异
-export function normalizeSelectionText(text) {
+export function normalizeSelectionText(text: string): string {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim()
 }
 
 // 划词翻译：定位选中文本在原文中的位置，返回其所在句前后各 extraSentences 句的语境。
 // 定位失败（如选区与原文不一致）返回空串，翻译降级为无语境，功能不中断。
-export function getSelectionContext(fullText, selection, extraSentences = 1) {
+export function getSelectionContext(fullText: string, selection: string, extraSentences = 1): string {
   const source = String(fullText || '')
   const needle = normalizeSelectionText(selection)
   if (!source || !needle) return ''
@@ -394,7 +420,7 @@ export function getSelectionContext(fullText, selection, extraSentences = 1) {
   // 原文按同策略归一化（空白折叠为单空格），并保留「折叠文本索引 → 原文索引」映射，
   // 使跨段落选择（选区字符串与原文空白形态不一致）也能定位
   let folded = ''
-  const indexMap = []
+  const indexMap: number[] = []
   let i = 0
   while (i < source.length) {
     if (/\s/.test(source[i])) {
@@ -414,9 +440,9 @@ export function getSelectionContext(fullText, selection, extraSentences = 1) {
   const endIdx = indexMap[pos + needle.length - 1] + 1
 
   SENTENCE_BOUNDARY_REGEX.lastIndex = 0
-  const sentences = []
+  const sentences: SentenceRange[] = []
   let s = 0
-  let b
+  let b: RegExpExecArray | null
   while ((b = SENTENCE_BOUNDARY_REGEX.exec(source)) !== null) {
     const end = b.index + b[0].length
     const piece = source.slice(s, end).trim()
@@ -444,9 +470,9 @@ export function getSelectionContext(fullText, selection, extraSentences = 1) {
   return sentences.slice(from, to + 1).map(x => x.text).join(' ')
 }
 
-export function getAllOccKeys(text) {
-  const keys = []
-  const counts = {}
+export function getAllOccKeys(text: string): string[] {
+  const keys: string[] = []
+  const counts: Record<string, number> = {}
   const wordRegex = /[a-zA-Z]+(?:'[a-zA-Z]+)?/g
   let match
   // 与 Reader 渲染一致：单字母单词（如 "I"、"a"）同样计入出现键
@@ -459,8 +485,8 @@ export function getAllOccKeys(text) {
   return keys
 }
 
-export function lemmatize(word) {
-  const rules = [
+export function lemmatize(word: string): string {
+  const rules: Array<{ suffix: string; replace: string }> = [
     { suffix: 'ies', replace: 'y' },
     { suffix: 'ves', replace: 'f' },
     { suffix: 'ses', replace: 's' },

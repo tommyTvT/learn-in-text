@@ -8,12 +8,23 @@ import { setLastSyncState, resetLastSyncState, syncAfterLogin } from '../../serv
 import { getLocalDataOwner, clearLocalData, setLocalDataOwner, downloadFullBackup } from '../../services/localData'
 import { LoaderCircle } from 'lucide-vue-next'
 import { alert, confirmDialog } from '../../services/dialog'
+import { useDialogA11y } from '../../composables/useDialogA11y'
 
-defineProps({
+const props = defineProps({
   open: { type: Boolean, default: false },
   stats: { type: Object, required: true }
 })
 const emit = defineEmits(['done', 'cancel'])
+
+// 弹窗无障碍：焦点移入与归还、Tab 循环。
+// 注意：这是「强制决策」弹窗，不可通过 Esc / 遮罩关闭（两个选项必须显式点击，
+// 取消会触发登出），因此 onClose 为空操作，只保留焦点管理能力。
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => props.open,
+  onClose: () => { /* 强制决策弹窗不响应 Esc */ },
+  panelRef
+})
 
 const auth = useAuthStore()
 const settingsStore = useSettingsStore()
@@ -108,7 +119,13 @@ async function handleCancel() {
 <template>
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-      <div class="w-full max-w-md bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-gray-200 dark:border-neutral-800 p-5 sm:p-6">
+      <div
+        ref="panelRef"
+        role="dialog"
+        aria-modal="true"
+        aria-label="发现本地数据"
+        class="w-full max-w-md bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-gray-200 dark:border-neutral-800 p-5 sm:p-6"
+      >
         <h2 class="text-lg font-bold text-gray-900 dark:text-neutral-100">发现本地数据</h2>
         <p class="mt-2 text-sm leading-relaxed text-gray-600 dark:text-neutral-400">
           本设备存有

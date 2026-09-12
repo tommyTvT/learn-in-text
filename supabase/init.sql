@@ -2,16 +2,22 @@
 -- LearnInText 云数据库一键初始化（全量基线）
 -- ============================================================================
 -- 用途：全新 Supabase 项目只需在 Dashboard → SQL Editor 执行本文件一次，
---       等价于按顺序执行 migrations/0001 ~ 0010 的最终累积状态。
+--       等价于按顺序执行 migrations/0001 ~ 0012 的最终累积状态。
 -- 幂等：可重复执行，不会删除已有数据；在已按迁移链初始化过的库上执行也安全
---       （会顺带完成两项收尾：profiles 开启 RLS、回收 anon 表权限）。
+--       （会顺带完成收尾：profiles 开启 RLS、回收 anon 全部表权限、
+--        删除注册专用 RPC 并收紧 security definer 函数授权）。
 -- 注意：本文件是全量基线，供人工执行；请勿移入 migrations/ 目录，
 --       以免未来用 CLI 管理迁移时被当作增量脚本重复执行。
--- 与迁移链的两处差异（均为修复/收紧，不影响功能）：
+-- 与迁移链的差异（均为修复/收紧，不影响功能）：
 --   * 显式 alter table public.profiles enable row level security（原迁移链缺失，
 --     导致 profiles 上的策略不生效，存在匿名读取用户名/邮箱的风险）
---   * 业务表权限仅授予 authenticated，并回收 anon（anon 只需调用下方 3 个 RPC：
---     username_exists / resolve_login_identifier / set_username）
+--   * 业务表权限仅授予 authenticated，并回收 anon（匿名不保留任何表权限与 RPC）
+--   * 对齐 0012：登录收紧为「邮箱直登」——注册已下线，账号由管理员在控制台
+--     手动创建；删除注册专用 RPC username_exists 与 resolve_login_identifier
+--     （后者曾允许匿名调用者按用户名换取任意用户邮箱），set_username /
+--     auth_username 仅 authenticated 可执行
+-- ⚠️ 部署后需在 Dashboard → Authentication → Providers → Email 关闭
+--    「Enable Email Signup」，否则 API 层仍可直接调 /auth/v1/signup 注册。
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -104,7 +110,7 @@ create unique index if not exists profiles_email_unique
   where email <> '';
 
 -- ----------------------------------------------------------------------------
--- 3. RPC 函数（均为迁移链最终版）
+-- 3. RPC 函数（迁移链最终版 + 0012 收紧：注册专用 RPC 已删除）
 -- ----------------------------------------------------------------------------
 -- 当前登录用户（auth.uid()）在 profiles 中绑定的 username，供 RLS 策略调用
 create or replace function public.auth_username()
@@ -119,7 +125,8 @@ as $$
   where id = auth.uid();
 $$;
 
--- 注册触发器：auth.users 创建时自动建 profile，从注册 meta 写入用户名；
+-- 注册触发器：auth.users 创建用户时（含控制台手动建号）自动建 profile，
+-- 从 meta 写入用户名（手动建号无 meta，落库为 ''，由首次登录绑定补齐）；
 -- 含服务端格式校验与撞名检查（0010 加固版）
 create or replace function public.handle_new_user()
 returns trigger
@@ -168,7 +175,8 @@ begin
 end;
 $$;
 
--- 设置用户名：仅当前为空时允许；服务端格式校验；成功返回 true
+-- 设置用户名：手动创建的账号首次登录时由客户端调用绑定（仅当前为空时允许；
+-- 服务端格式校验，username 唯一部分唯一索引兜底撞名）；成功返回 true
 drop function if exists public.set_username(text);
 create or replace function public.set_username(uname text)
 returns boolean
@@ -203,38 +211,12 @@ begin
 end;
 $$;
 
--- 登录前按「用户名 或 邮箱」解析邮箱（anon 可调用，注册/登录流程依赖）
-create or replace function public.resolve_login_identifier(identifier text)
-returns text
-language sql
-security definer
-set search_path = public
-as $$
-  select case
-    -- 参数是邮箱格式：直接用
-    when identifier ~ '@' then identifier
-    -- 否则按用户名查邮箱
-    else (
-      select email from public.profiles
-      where username = resolve_login_identifier.identifier
-        and email <> ''
-      limit 1
-    )
-  end;
-$$;
-
--- 按用户名查询是否已存在（注册时前端预校验，仅返回布尔）
-create or replace function public.username_exists(uname text)
-returns boolean
-language sql
-security definer
-set search_path = public
-as $$
-  select exists (
-    select 1 from public.profiles
-    where username = username_exists.uname
-  );
-$$;
+-- 注册已下线（账号由管理员手动创建，登录为邮箱直登）：
+-- 删除注册专用 RPC —— username_exists（注册预检）与
+-- resolve_login_identifier（用户名→邮箱解析，曾允许匿名调用者换取任意用户邮箱）。
+-- drop 语句使「在存量库上重放本基线」也能一并清除这两个已废弃函数。
+drop function if exists public.resolve_login_identifier(text);
+drop function if exists public.username_exists(text);
 
 -- ----------------------------------------------------------------------------
 -- 4. 触发器
@@ -302,7 +284,7 @@ create policy "select own profile" on public.profiles
 -- 需参照上面对应补一条 auth_user_access 策略。
 
 -- ----------------------------------------------------------------------------
--- 6. 权限（收紧版）：业务表仅 authenticated；anon 只保留 RPC 调用权
+-- 6. 权限（收紧版）：业务表仅 authenticated；匿名不保留任何表权限与 RPC
 -- ----------------------------------------------------------------------------
 grant select, insert, update, delete
   on public.articles, public.words, public.word_marks,
@@ -319,10 +301,10 @@ grant usage, select on sequence public.context_translations_id_seq to authentica
 grant usage, select on sequence public.user_settings_id_seq to authenticated;
 
 -- 防御性回收：Supabase 的默认授权会把新表权限也给 anon，这里显式收回
---（anon 的注册/登录只依赖下方 RPC，不直接访问任何表）
+--（注册已下线，匿名不需要访问任何表；客户端表操作均以 authenticated 会话进行）
 revoke select, insert, update, delete
   on public.articles, public.words, public.word_marks,
-     public.context_translations, public.user_settings
+     public.context_translations, public.user_settings, public.profiles
   from anon;
 revoke all
   on sequence public.articles_id_seq, public.words_id_seq,
@@ -330,10 +312,12 @@ revoke all
      public.user_settings_id_seq
   from anon;
 
--- RPC 授权
-grant execute on function public.resolve_login_identifier(text) to anon, authenticated;
-grant execute on function public.username_exists(text) to anon, authenticated;
+-- RPC 授权：匿名不保留任何 RPC；security definer 函数默认授权给 PUBLIC，
+-- 必须显式收回，仅保留 authenticated 所需的两项（RLS 评估 / 首次绑定用户名）
+revoke execute on function public.set_username(text) from public, anon;
 grant execute on function public.set_username(text) to authenticated;
+
+revoke execute on function public.auth_username() from public, anon;
 grant execute on function public.auth_username() to authenticated;
 
 -- 注册触发器函数仅 service_role 可执行（触发本身不需要 EXECUTE 权限，回收防裸调）

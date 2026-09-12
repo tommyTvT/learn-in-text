@@ -352,6 +352,38 @@ body uni-textarea[rows="3"] .uni-textarea-textarea { height: calc(3 * 1lh) !impo
 body uni-textarea[rows="6"] .uni-textarea-textarea { height: calc(6 * 1lh) !important; }
 body uni-textarea[rows="12"] .uni-textarea-textarea { height: calc(12 * 1lh) !important; }
 
+/* ============================================================
+   键盘焦点可见性
+   背景：uni-app 会把 <button>/<input>/<textarea> 编译成自定义元素，
+   真实输入层的 outline 在上文被 `outline: none !important` 移除，
+   而宿主元素通常不匹配 :focus（焦点在内层真实 input 上），
+   结果键盘用户完全看不到焦点位置（鼠标点击不依赖焦点环，视觉无影响）。
+   处理：
+   - 所有可聚焦元素统一用 :focus-visible 画环（只在键盘导航时出现，不干扰鼠标点击）
+   - 输入类组件用 :focus-within 命中宿主：无论焦点落在外层宿主还是内层真实输入，
+     只要焦点在组件内就显示环
+   ============================================================ */
+:focus-visible {
+  outline: 2px solid #2563eb; /* blue-600，与主色一致 */
+  outline-offset: 2px;
+}
+
+:root.dark :focus-visible {
+  outline-color: #60a5fa; /* blue-400：深色底上提高对比度 */
+}
+
+body uni-input:focus-within,
+body uni-textarea:focus-within {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+  border-radius: 6px;
+}
+
+:root.dark body uni-input:focus-within,
+:root.dark body uni-textarea:focus-within {
+  outline-color: #60a5fa;
+}
+
 /* 占位层对齐：placeholder 保持库的 absolute + top:auto（静态位置对齐输入文字），
    但锁死行高继承，避免宿主行高变化时占位文字错位 */
 body uni-input .uni-input-placeholder,

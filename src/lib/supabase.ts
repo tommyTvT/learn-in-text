@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { useSettingsStore } from '../stores/settings'
 
 // 单例挂在 window/globalThis 上，而不是模块级变量：
@@ -6,19 +6,27 @@ import { useSettingsStore } from '../stores/settings'
 // 导致每次热更新都 createClient 出新实例，触发 GoTrueClient
 // "Multiple GoTrueClient instances" 警告。挂全局后 HMR 也能复用旧实例。
 const GLOBAL_KEY = '__learn_in_text_supabase__'
-const holder = typeof window !== 'undefined' ? window : globalThis
+const holder = (typeof window !== 'undefined' ? window : globalThis) as typeof globalThis & {
+  __learn_in_text_supabase__?: SupabaseHolder
+}
+
+/** 全局单例持有结构 */
+interface SupabaseHolder {
+  client: SupabaseClient | null
+  config: { url: string; anonKey: string } | null
+}
 
 /** 归一化配置：去首尾空白 + 去掉 URL 末尾多余的斜杠，避免仅因格式差异重建客户端 */
-function normalizeConfig(value) {
-  return (value || '').trim().replace(/\/+$/, '')
+function normalizeConfig(value: unknown): string {
+  return String(value || '').trim().replace(/\/+$/, '')
 }
 
 /**
  * 获取 Supabase 客户端单例；未配置时返回 null（不抛异常）。
  * 从 settings store 读取 supabaseUrl 和 supabaseAnonKey 动态创建。
  */
-export function getSupabaseOrNull() {
-  let settings
+export function getSupabaseOrNull(): SupabaseClient | null {
+  let settings: ReturnType<typeof useSettingsStore>
   try {
     settings = useSettingsStore()
   } catch {
@@ -63,10 +71,13 @@ export function getSupabaseOrNull() {
  * 获取 Supabase 客户端单例。
  * 配置缺失时抛错（调用方需要明确提示用户先完成云存储配置）。
  */
-export function getSupabase() {
+export function getSupabase(): SupabaseClient {
   const client = getSupabaseOrNull()
   if (!client) {
-    throw new Error('请先在设置页填写 Supabase 项目地址和 anon key')
+    // 文案必须与实际配置入口一致：设置页并没有 Supabase 输入项，
+    // 配置来自项目根目录 .env 的 VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
+    // （构建/运行时注入）。原先指向设置页会让用户找不到可填之处。
+    throw new Error('云同步未配置：请在项目根目录 .env 中填写 VITE_SUPABASE_URL 与 VITE_SUPABASE_ANON_KEY 后重新构建')
   }
   return client
 }

@@ -2,7 +2,7 @@
 // H5 端表现为样式化的模态框，与整体 UI 更协调
 
 /** 提示弹窗（替代原生 alert），返回 Promise 便于 await */
-export function alert(message, title = '提示') {
+export function alert(message: unknown, title = '提示'): Promise<void> {
   return new Promise((resolve) => {
     uni.showModal({
       title,
@@ -16,7 +16,7 @@ export function alert(message, title = '提示') {
 }
 
 /** 确认弹窗（替代原生 confirm），resolve(true/false) 表示用户选择 */
-export function confirmDialog(message, title = '确认') {
+export function confirmDialog(message: unknown, title = '确认'): Promise<boolean> {
   return new Promise((resolve) => {
     uni.showModal({
       title,

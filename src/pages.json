@@ -44,12 +44,6 @@
 			}
 		},
 		{
-			"path": "pages/auth/register",
-			"style": {
-				"navigationStyle": "custom"
-			}
-		},
-		{
 			"path": "pages/auth/email-verified",
 			"style": {
 				"navigationStyle": "custom"

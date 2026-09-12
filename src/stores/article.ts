@@ -2,13 +2,14 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { articleService } from '../services/db'
 import { useWordStore } from './word'
+import type { Article, ArticleInput } from '../types'
 
 export const useArticleStore = defineStore('article', () => {
-  const articles = ref([])
-  const currentArticle = ref(null)
+  const articles = ref<Article[]>([])
+  const currentArticle = ref<Article | null>(null)
   const loading = ref(false)
 
-  async function fetchArticles() {
+  async function fetchArticles(): Promise<void> {
     loading.value = true
     try {
       articles.value = await articleService.getAll()
@@ -17,24 +18,26 @@ export const useArticleStore = defineStore('article', () => {
     }
   }
 
-  async function fetchArticle(id) {
+  async function fetchArticle(id: number): Promise<Article | null> {
     loading.value = true
     try {
-      currentArticle.value = await articleService.getById(id)
+      currentArticle.value = (await articleService.getById(id)) ?? null
       return currentArticle.value
     } finally {
       loading.value = false
     }
   }
 
-  async function createArticle(data) {
+  async function createArticle(data: ArticleInput): Promise<Article> {
     const article = await articleService.create(data)
     articles.value.unshift(article)
     return article
   }
 
-  async function updateArticle(id, data) {
+  async function updateArticle(id: number, data: Partial<Article>): Promise<Article | undefined> {
     const article = await articleService.update(id, data)
+    // 记录可能已被删除（update 返回 undefined）：此时不可把 undefined 写进内存列表
+    if (!article) return undefined
     const index = articles.value.findIndex(a => a.id === id)
     if (index !== -1) {
       articles.value[index] = article
@@ -50,7 +53,7 @@ export const useArticleStore = defineStore('article', () => {
    * 移动端触摸拖拽过程中会连续调用它做实时换位，松手时再统一落库，
    * 避免拖拽过程中产生大量 IndexedDB 写入。
    */
-  function applyArticleOrder(fromIndex, toIndex) {
+  function applyArticleOrder(fromIndex: number, toIndex: number): void {
     if (fromIndex === toIndex) return
     const list = articles.value.slice()
     const [moved] = list.splice(fromIndex, 1)
@@ -61,19 +64,19 @@ export const useArticleStore = defineStore('article', () => {
   }
 
   /** 把当前内存顺序整体写入本地库（并刷新 updatedAt 以触发云端同步） */
-  async function persistArticleOrder() {
-    await articleService.updateSortOrders(articles.value.map(a => a.id))
+  async function persistArticleOrder(): Promise<void> {
+    await articleService.updateSortOrders(articles.value.map(a => a.id!))
   }
 
   /**
    * 拖拽排序：把文章从 fromIndex 移动到 toIndex，并持久化整体顺序。
    */
-  async function moveArticle(fromIndex, toIndex) {
+  async function moveArticle(fromIndex: number, toIndex: number): Promise<void> {
     applyArticleOrder(fromIndex, toIndex)
     await persistArticleOrder()
   }
 
-  async function deleteArticle(id) {
+  async function deleteArticle(id: number): Promise<void> {
     await articleService.delete(id)
     articles.value = articles.value.filter(a => a.id !== id)
     if (currentArticle.value?.id === id) {

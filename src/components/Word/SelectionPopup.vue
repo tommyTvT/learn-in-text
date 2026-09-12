@@ -2,6 +2,8 @@
 import { ref, computed, onMounted, onUnmounted, provide } from 'vue'
 import { MessageCircleQuestion } from 'lucide-vue-next'
 import { parseSelectionComponents, generateAlignedTranslation } from '../../services/ai'
+import { errorText } from '../../services/errors'
+import { useDialogA11y } from '../../composables/useDialogA11y'
 import ClauseSegment from './ClauseSegment.vue'
 import AlignedClause from './AlignedClause.vue'
 import {
@@ -17,17 +19,37 @@ const props = defineProps({
   text: String,
   translation: String,
   loading: Boolean,
-  error: Boolean,
+  // 兼容布尔（旧用法：仅表示失败）与字符串（失败原因，可直接展示）
+  error: [Boolean, String],
   // 选区上下文（前后文），供语法解析消歧
   context: String
 })
 
 const emit = defineEmits(['close', 'retry', 'ask'])
 
+// 弹窗无障碍：Esc 关闭（复用带移动端收起动画的 startClose）、焦点移入/归还、Tab 循环。
+// 本组件挂载即打开（父级 v-if 控制显隐）。
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => true,
+  onClose: () => startClose(),
+  panelRef
+})
+
 // ---- 句子成分解析（弹窗打开即默认触发） ----
 const segments = ref([]) // [{ text, role, clause? }] 按原文顺序的成分片段（可嵌套从句）
 const parsing = ref(false)
 const parseError = ref(false)
+// 失败原因（空串时回退通用文案）：把 AI 抛出的可行动消息（未配置接口 / 鉴权失败 / 超时）透出，
+// 否则用户只会看到「XX 失败」+ 重试的死循环
+const parseErrorMsg = ref('')
+
+/** 对外 error prop 的展示文案（兼容布尔） */
+const translationErrorText = computed(() => {
+  const e = props.error
+  return typeof e === 'string' && e ? e : '翻译失败'
+})
+const parseErrorText = computed(() => parseErrorMsg.value || '句子成分解析失败')
 let parseCtrl = null // 成分解析请求的 AbortController
 let alive = true // 卸载守卫：组件卸载后不再更新状态
 
@@ -59,6 +81,8 @@ function setTranslationMode(mode) {
 const alignedSegments = ref([]) // [{ enIndex, zh, children? }] 按中文语序，enIndex 指向顶层英文片段下标；children 为从句内部逐成分译文
 const alignedLoading = ref(false)
 const alignedError = ref(false)
+const alignedErrorMsg = ref('')
+const alignedErrorText = computed(() => alignedErrorMsg.value || '对应译文生成失败')
 let alignedCtrl = null // 对齐翻译请求的 AbortController
 
 // 对齐联动状态：英文片段 ↔ 中文片段 双向高亮（按对齐路径：顶层 [i]，从句内部 [i, j]…）
@@ -164,6 +188,7 @@ const alignedView = computed(() => {
 async function runAlignedTranslation(topSegments) {
   alignedLoading.value = true
   alignedError.value = false
+  alignedErrorMsg.value = ''
   alignedSegments.value = []
   clearActive()
   alignedCtrl = new AbortController()
@@ -174,8 +199,9 @@ async function runAlignedTranslation(topSegments) {
     alignedSegments.value = result.segments.filter(s => s.zh || hasAlignedChildren(s))
   } catch (error) {
     if (!alive || error?.name === 'AbortError') return
-    console.error('对应译文生成失败:', error.message)
+    console.error('对应译文生成失败:', error)
     alignedError.value = true
+    alignedErrorMsg.value = errorText(error, '')
   } finally {
     alignedCtrl = null
     if (alive) {
@@ -288,10 +314,12 @@ const usedRoles = computed(() => {
 async function runParse() {
   parsing.value = true
   parseError.value = false
+  parseErrorMsg.value = ''
   segments.value = []
   // 重新解析时旧对齐译文失效：中止进行中的请求并清空状态
   alignedSegments.value = []
   alignedError.value = false
+  alignedErrorMsg.value = ''
   alignedCtrl?.abort()
   clauseInfoById.clear()
   clearActive()
@@ -305,8 +333,9 @@ async function runParse() {
     runAlignedTranslation(result.segments)
   } catch (error) {
     if (!alive || error?.name === 'AbortError') return
-    console.error('句子成分解析失败:', error.message)
+    console.error('句子成分解析失败:', error)
     parseError.value = true
+    parseErrorMsg.value = errorText(error, '')
   } finally {
     parseCtrl = null
     if (alive) {
@@ -384,6 +413,10 @@ function startClose() {
 
     <!-- 独立界面：移动端底部弹出（比单词翻译抽屉更高），PC 端居中大卡片 -->
     <div
+      ref="panelRef"
+      role="dialog"
+      aria-modal="true"
+      aria-label="划词翻译"
       class="relative w-full sm:max-w-3xl bg-white dark:bg-neutral-900 rounded-t-2xl sm:rounded-lg shadow-xl border border-gray-200 dark:border-neutral-800 flex flex-col min-h-[60vh] sm:min-h-0 max-h-[90vh] sm:max-h-[80vh]"
       :class="isMobile
         ? [
@@ -469,8 +502,8 @@ function startClose() {
             <div class="animate-spin inline-block w-4 h-4 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></div>
             <span class="text-xs text-gray-400 dark:text-neutral-500">正在解析句子成分…</span>
           </div>
-          <div v-else-if="parseError" class="flex items-center gap-2 mt-2">
-            <span class="text-xs text-red-500 dark:text-red-400">句子成分解析失败</span>
+          <div v-else-if="parseError" class="flex items-start gap-2 mt-2">
+            <span class="text-xs text-red-500 dark:text-red-400">{{ parseErrorText }}</span>
             <button
               @click="retryParse"
               class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
@@ -525,14 +558,15 @@ function startClose() {
                 >{{ frag.zh }}</span>
               </template>
             </p>
-            <!-- 对应模式加载中（成分解析 / 对齐翻译） -->
+            <!-- 对应模式加载中：成分解析阶段由上方状态行承担 spinner 与文案，
+                 这里只补一句「等待」提示，避免同屏两处相同文案 + 两个 spinner -->
             <div v-else-if="alignedView === 'loading'" class="flex items-center gap-2 py-2">
-              <div class="animate-spin inline-block w-4 h-4 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></div>
-              <span class="text-xs text-gray-400 dark:text-neutral-500">{{ parsing ? '正在解析句子成分…' : '正在生成对应译文…' }}</span>
+              <div v-if="!parsing" class="animate-spin inline-block w-4 h-4 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></div>
+              <span class="text-xs text-gray-400 dark:text-neutral-500">{{ parsing ? '等待成分解析完成…' : '正在生成对应译文…' }}</span>
             </div>
             <!-- 对应模式失败 -->
-            <div v-else-if="alignedView === 'error'" class="flex items-center gap-2 py-1">
-              <span class="text-xs text-red-500 dark:text-red-400">对应译文生成失败</span>
+            <div v-else-if="alignedView === 'error'" class="flex items-start gap-2 py-1">
+              <span class="text-xs text-red-500 dark:text-red-400">{{ alignedErrorText }}</span>
               <button
                 @click="retryAligned"
                 class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
@@ -547,8 +581,8 @@ function startClose() {
               <div v-if="loading" class="py-3 text-center">
                 <div class="animate-spin inline-block w-5 h-5 border-2 border-gray-300 dark:border-neutral-600 border-t-blue-600 rounded-full"></div>
               </div>
-              <div v-else-if="error" class="flex items-center gap-2 py-1">
-                <span class="text-xs text-red-500 dark:text-red-400">翻译失败</span>
+              <div v-else-if="error" class="flex items-start gap-2 py-1">
+                <span class="text-xs text-red-500 dark:text-red-400">{{ translationErrorText }}</span>
                 <button
                   @click="$emit('retry')"
                   class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch, nextTick } from 'vue'
 import { useAuthStore } from './auth'
 import { fetchCloudSettings, pushCloudSettings } from '../services/settingsSync'
+import type { ModelConfig, PresetProvider, Provider, SettingsData, SettingsImportData, Theme } from '../types'
 
 const STORAGE_KEY = 'learn_in_text_settings'
 // 记录本地设置最后修改/同步时间，用于云端设置 LWW 冲突解决
@@ -12,7 +13,7 @@ const SETTINGS_TIME_KEY = 'learn_in_text_settings_time'
 const BUILTIN_SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || '').trim()
 const BUILTIN_SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
 
-export const PRESET_PROVIDERS = {
+export const PRESET_PROVIDERS: Record<string, PresetProvider> = {
   deepseek: {
     name: 'DeepSeek',
     endpoint: 'https://api.deepseek.com/v1',
@@ -20,36 +21,38 @@ export const PRESET_PROVIDERS = {
   }
 }
 
-const THEMES = ['system', 'light', 'dark']
-const DEFAULT_MAX_CONCURRENCY = 50
-const DEFAULT_BASIC_INFO_MAX_TOKENS = 300
-const DEFAULT_CONTEXT_MAX_TOKENS = 300
-const DEFAULT_ARTICLE_MAX_TOKENS = 2000
-const DEFAULT_REQUEST_TIMEOUT = 30
+const THEMES: Theme[] = ['system', 'light', 'dark']
+// 导出数值类默认值：设置页的输入校验需要在非法值（0 / 负数 / 清空）时回退到默认值，
+// 直接引用这里可避免两处各写一份、日后改默认值只改一处的遗漏
+export const DEFAULT_MAX_CONCURRENCY = 50
+export const DEFAULT_BASIC_INFO_MAX_TOKENS = 300
+export const DEFAULT_CONTEXT_MAX_TOKENS = 300
+export const DEFAULT_ARTICLE_MAX_TOKENS = 2000
+export const DEFAULT_REQUEST_TIMEOUT = 30
 const DEFAULT_AUTO_SYNC = true
 // 划词翻译（选区翻译 + 追问解析）
 const DEFAULT_ENABLE_SELECTION_TRANSLATION = true
 // 点击单词自动发音（浏览器原生 TTS）
 const DEFAULT_AUTO_PRONOUNCE = true
-const DEFAULT_SELECTION_MAX_TOKENS = 500
-const DEFAULT_SELECTION_CHAT_MAX_TOKENS = 1000
+export const DEFAULT_SELECTION_MAX_TOKENS = 500
+export const DEFAULT_SELECTION_CHAT_MAX_TOKENS = 1000
 // 词义生成：合批请求（把多个单词打包进一次 AI 请求，按所在句子分组）
 const DEFAULT_ENABLE_BATCH_WORD_REQUEST = true
 // 词义生成：按需生成（进入文章不自动生成词义，仅点击单词时生成）
 const DEFAULT_ENABLE_ON_DEMAND_WORD_GENERATION = false
 
-function toPositiveNumber(value, fallback) {
+function toPositiveNumber(value: unknown, fallback: number): number {
   const num = Number(value)
   return Number.isFinite(num) && num > 0 ? num : fallback
 }
 
-function systemPrefersDark() {
+function systemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches
 }
 
 let providerSeq = 0
 
-function createPresetProvider(presetKey) {
+function createPresetProvider(presetKey: string): Provider {
   const preset = PRESET_PROVIDERS[presetKey]
   return {
     id: 'preset-' + presetKey,
@@ -61,7 +64,7 @@ function createPresetProvider(presetKey) {
 }
 
 /** 供应商（共享资源池）只保留连接信息，模型选择下放到「文本模型 / 视觉模型」配置 */
-function normalizeProvider(raw) {
+function normalizeProvider(raw: any): Provider | null {
   if (!raw || typeof raw !== 'object') return null
   if (raw.preset) {
     // 已下架的预设直接丢弃
@@ -80,7 +83,7 @@ function normalizeProvider(raw) {
 }
 
 /** 规范化单份模型配置：{ providerId, model } */
-function normalizeModelConfig(raw, providers) {
+function normalizeModelConfig(raw: any, providers: Provider[]): ModelConfig {
   if (raw && typeof raw === 'object' && providers.some(p => p.id === raw.providerId)) {
     return { providerId: raw.providerId, model: raw.model || '' }
   }
@@ -91,18 +94,18 @@ function normalizeModelConfig(raw, providers) {
  * 解析文本/视觉模型配置，兼容旧结构（供应商内嵌 model/visionModel + activeProviderId）。
  * 返回 { text, vision }。
  */
-function resolveModelConfigs(data, providers) {
+function resolveModelConfigs(data: any, providers: Provider[]): { text: ModelConfig; vision: ModelConfig } {
   let text = normalizeModelConfig(data?.textModelConfig, providers)
   let vision = normalizeModelConfig(data?.visionModelConfig, providers)
 
   const oldProviders = Array.isArray(data?.providers) ? data.providers : []
   if (oldProviders.length) {
-    const active = oldProviders.find(p => p.id === data?.activeProviderId) || oldProviders[0]
+    const active = oldProviders.find((p: any) => p.id === data?.activeProviderId) || oldProviders[0]
     if (!data?.textModelConfig && active?.model) {
       text = { providerId: active.id, model: active.model }
     }
     if (!data?.visionModelConfig) {
-      const vp = oldProviders.find(p => p.visionModel)
+      const vp = oldProviders.find((p: any) => p.visionModel)
       vision = vp
         ? { providerId: vp.id, model: vp.visionModel }
         : { providerId: text.providerId, model: '' }
@@ -112,11 +115,11 @@ function resolveModelConfigs(data, providers) {
 }
 
 export const useSettingsStore = defineStore('settings', () => {
-  const providers = ref([])
+  const providers = ref<Provider[]>([])
   // 文本模型配置与视觉模型配置：各自独立选择（供应商可共用，模型可不同）
-  const textModelConfig = ref({ providerId: '', model: '' })
-  const visionModelConfig = ref({ providerId: '', model: '' })
-  const theme = ref('system')
+  const textModelConfig = ref<ModelConfig>({ providerId: '', model: '' })
+  const visionModelConfig = ref<ModelConfig>({ providerId: '', model: '' })
+  const theme = ref<Theme>('system')
   const maxConcurrency = ref(DEFAULT_MAX_CONCURRENCY)
   const basicInfoMaxTokens = ref(DEFAULT_BASIC_INFO_MAX_TOKENS)
   const contextMaxTokens = ref(DEFAULT_CONTEXT_MAX_TOKENS)
@@ -140,7 +143,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const syncedAt = ref(0)         // 上次成功与云端同步的时间（成功拉取/推送后更新）
   const cloudSyncing = ref(false) // 同步进行中标志，避免并发
 
-  function loadSyncTimes() {
+  function loadSyncTimes(): void {
     try {
       const raw = JSON.parse(localStorage.getItem(SETTINGS_TIME_KEY) || 'null')
       syncedAt.value = raw?.syncedAt || 0
@@ -148,7 +151,7 @@ export const useSettingsStore = defineStore('settings', () => {
       syncedAt.value = 0
     }
   }
-  function persistSyncTimes() {
+  function persistSyncTimes(): void {
     try {
       localStorage.setItem(SETTINGS_TIME_KEY, JSON.stringify({ syncedAt: syncedAt.value }))
     } catch {
@@ -170,9 +173,9 @@ export const useSettingsStore = defineStore('settings', () => {
     return theme.value === 'dark'
   })
 
-  let systemDarkListener = null
+  let systemDarkListener: ((e: MediaQueryListEvent) => void) | null = null
 
-  function applyTheme() {
+  function applyTheme(): void {
     const dark = isDark.value
     document.documentElement.classList.toggle('dark', dark)
 
@@ -189,14 +192,14 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  function toggleTheme() {
+  function toggleTheme(): void {
     theme.value = isDark.value ? 'light' : 'dark'
     applyTheme()
   }
 
   // ---- 供应商管理（共享资源池） ----
 
-  function addCustomProvider() {
+  function addCustomProvider(): Provider {
     const customCount = providers.value.filter(p => !p.preset).length
     const provider = {
       id: 'custom-' + Date.now().toString(36) + '-' + (++providerSeq),
@@ -209,7 +212,7 @@ export const useSettingsStore = defineStore('settings', () => {
     return provider
   }
 
-  function removeProvider(id) {
+  function removeProvider(id: string): void {
     const index = providers.value.findIndex(p => p.id === id)
     if (index === -1) return
     providers.value.splice(index, 1)
@@ -224,27 +227,27 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // ---- 模型配置（供 UI 直接读写） ----
 
-  function setTextModel(providerId, model) {
+  function setTextModel(providerId: string, model: string): void {
     const pid = providers.value.some(p => p.id === providerId)
       ? providerId
       : textModelConfig.value.providerId
     textModelConfig.value = { providerId: pid, model: model || '' }
   }
 
-  function setVisionModel(providerId, model) {
+  function setVisionModel(providerId: string, model: string): void {
     const pid = providers.value.some(p => p.id === providerId)
       ? providerId
       : visionModelConfig.value.providerId
     visionModelConfig.value = { providerId: pid, model: model || '' }
   }
 
-  function loadSettings() {
+  function loadSettings(): void {
     try {
       const saved = localStorage.getItem(STORAGE_KEY)
       const data = saved ? JSON.parse(saved) : {}
 
       if (Array.isArray(data.providers) && data.providers.length) {
-        providers.value = data.providers.map(normalizeProvider).filter(Boolean)
+        providers.value = data.providers.map(normalizeProvider).filter((p: any): p is Provider => p != null)
       }
       if (!providers.value.length) {
         providers.value = [createPresetProvider('deepseek')]
@@ -296,7 +299,7 @@ export const useSettingsStore = defineStore('settings', () => {
     applyTheme()
   }
 
-  function saveSettings() {
+  function saveSettings(): void {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         providers: providers.value,
@@ -325,7 +328,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   /** 文本模型是否已配置（供应商 endpoint + apiKey 齐全） */
-  function isConfigured() {
+  function isConfigured(): boolean {
     return !!(textProvider.value?.endpoint && textProvider.value?.apiKey)
   }
 
@@ -353,9 +356,9 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  function importSettings(data) {
+  function importSettings(data: SettingsImportData): void {
     if (Array.isArray(data.providers) && data.providers.length) {
-      providers.value = data.providers.map(normalizeProvider).filter(Boolean)
+      providers.value = data.providers.map(normalizeProvider).filter((p: any): p is Provider => p != null)
     }
     const { text, vision } = resolveModelConfigs(data, providers.value)
     textModelConfig.value = text
@@ -390,12 +393,13 @@ export const useSettingsStore = defineStore('settings', () => {
    *  不应被云端设置覆盖。 */
   function exportSettingsPayload() {
     const s = exportSettings()
-    const { supabaseUrl, supabaseAnonKey, username, ...rest } = s
+    // username 并不存在于设置结构中（历史兼容写法），此处断言以保留原有解构语义
+    const { supabaseUrl, supabaseAnonKey, username, ...rest } = s as SettingsData & { username?: string }
     return rest
   }
 
   /** 将云端设置应用到本地（不标记为本地修改）。同样排除环境配置字段。 */
-  function applyCloudSettings(payload) {
+  function applyCloudSettings(payload: any): void {
     const { supabaseUrl, supabaseAnonKey, username, ...rest } = payload || {}
     silentApply = true
     try {
@@ -409,7 +413,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   /** 登录后从云端拉取设置：云端较新则以云端覆盖本地 */
-  async function syncFromCloud() {
+  async function syncFromCloud(): Promise<void> {
     const auth = useAuthStore()
     const username = auth.username?.trim()
     if (!username) return
@@ -438,10 +442,10 @@ export const useSettingsStore = defineStore('settings', () => {
   // 拉取/推送后的回声防护窗口（毫秒）：窗口内的上传推迟执行
   const PUSH_ECHO_GUARD_MS = 3000
   // 上传防抖定时器
-  let uploadTimer = null
+  let uploadTimer: ReturnType<typeof setTimeout> | null = null
 
   /** 本地设置变更后上传到云端 */
-  async function pushToCloud() {
+  async function pushToCloud(): Promise<void> {
     const auth = useAuthStore()
     const username = auth.username?.trim()
     // isLoggedIn 必查：本地身份快照会在未登录时也提供 username，
@@ -472,7 +476,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   // 上传防抖
-  function scheduleUpload() {
+  function scheduleUpload(): void {
     if (uploadTimer) clearTimeout(uploadTimer)
     uploadTimer = setTimeout(() => {
       uploadTimer = null
@@ -485,7 +489,7 @@ export const useSettingsStore = defineStore('settings', () => {
    * silentApply 需维持到 watcher 回调执行完（watch 默认异步 flush），
    * 否则重置会被当作本地修改触发 saveSettings + 云端回传。
    */
-  async function resetSettings() {
+  async function resetSettings(): Promise<void> {
     silentApply = true
     try {
       providers.value = [createPresetProvider('deepseek')]

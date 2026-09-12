@@ -120,12 +120,14 @@ H5 产物在 `dist/build/h5`，使用 hash 路由（`manifest.json` 中配置）
 
 ### 前端配置
 
-在「设置 → 云同步」中填写（或通过 `.env` 内置，见下）：
+云存储配置通过项目根目录的 `.env` 注入（构建 / 运行时自动读取，界面内没有对应的输入项）：
 
-- Supabase 项目地址（`https://xxxx.supabase.co`）
-- Supabase anon key
+- `VITE_SUPABASE_URL`：Supabase 项目地址（`https://xxxx.supabase.co`）
+- `VITE_SUPABASE_ANON_KEY`：Supabase anon key
 
-> 两种方式二选一即可；`init.sql` 供人工执行，请勿移入 `migrations/` 目录。存量库也可直接执行 `init.sql`：数据不受影响，并会顺带开启 `profiles` 的 RLS（原迁移链缺失此句）、回收 anon 的表权限。
+未配置时云同步整体不可用（设置页会给出提示），本地功能不受影响。
+
+> `init.sql` 供人工执行，请勿移入 `migrations/` 目录。存量库也可直接执行 `init.sql`：数据不受影响，并会顺带开启 `profiles` 的 RLS（原迁移链缺失此句）、回收 anon 的表权限。
 
 ### 内置云存储配置（可选）
 

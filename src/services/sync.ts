@@ -3,17 +3,46 @@ import { db, stableKey, newUid } from './db'
 import { useAuthStore } from '../stores/auth'
 import { useWordStore } from '../stores/word'
 import { useArticleStore } from '../stores/article'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
-const TABLES = ['articles', 'words', 'word_marks', 'context_translations']
+const TABLES: string[] = ['articles', 'words', 'word_marks', 'context_translations']
+
+/** 同步流程中的通用行：字段随表而异（本地行 / 云端行 / 合成占位行），故用宽松类型承载 */
+type SyncRow = Record<string, any>
+
+/** 同步进度回调（登录页进度条用） */
+export type SyncProgressCallback = (progress: { label: string; percent: number }) => void
+
+/** 同步明细：各表的推送/新增/更新/删除计数 */
+export interface SyncDetail {
+  durationMs: number
+  incremental: boolean
+  /** 探测到已被其他设备物理删除的云端行数（>0 时需立即全量重跑校准） */
+  missingCloudRows?: number
+  /** 各表云端 / 本地行数（调试展示用） */
+  cloud?: Record<string, number>
+  local?: Record<string, number>
+  pushed: Record<string, number>
+  added: Record<string, number>
+  updated: Record<string, number>
+  deleted: Record<string, number>
+}
+
+/** 同步结果 */
+export interface SyncResult {
+  success: boolean
+  message: string
+  detail: SyncDetail
+}
 
 // 模块级并发锁：同步进行中再次调用 syncNow 时复用同一 Promise（合并为一次同步），
 // 避免手动同步与自动同步并发导致重复推送/插入。
-let inflightSync = null
+let inflightSync: Promise<SyncResult> | null = null
 
 // 表格中文名（同步结果提示用）
-const TABLE_LABELS = { articles: '文章', words: '单词', word_marks: '标记', context_translations: '翻译' }
+const TABLE_LABELS: Record<string, string> = { articles: '文章', words: '单词', word_marks: '标记', context_translations: '翻译' }
 
-const ts = (v) => (v ? new Date(v).getTime() : 0)
+const ts = (v: any): number => (v ? new Date(v).getTime() : 0)
 
 // 增量同步水位（localStorage，按账号隔离）：上次成功同步时，已合并的云端行中
 // 最大的 updatedAt。下次只拉 updatedAt > 水位 的云端行。
@@ -22,7 +51,7 @@ const ts = (v) => (v ? new Date(v).getTime() : 0)
 // 另外云端 updatedAt 由各设备本地时钟写入，时钟偏差大的设备之间理论上可能漏拉。
 const WATERMARK_KEY = 'learn_in_text_sync_watermark'
 
-function readWatermark(username) {
+function readWatermark(username: string): string | null {
   try {
     const raw = JSON.parse(localStorage.getItem(WATERMARK_KEY) || 'null')
     if (raw && raw.username === username && raw.updatedAt) return raw.updatedAt
@@ -32,7 +61,7 @@ function readWatermark(username) {
   return null
 }
 
-function writeWatermark(username, updatedAt) {
+function writeWatermark(username: string, updatedAt: string | null): void {
   try {
     if (updatedAt) localStorage.setItem(WATERMARK_KEY, JSON.stringify({ username, updatedAt }))
     else localStorage.removeItem(WATERMARK_KEY)
@@ -45,7 +74,7 @@ function writeWatermark(username, updatedAt) {
  * 解析「word|本地文章id|occKey」形式的子表快照键，并解析出对应本地单词 id。
  * 增量补全（快照合成占位行）时用于还原标记/翻译的外键；解析不到返回 null。
  */
-function parseChildSnapKey(key, localWordByKey) {
+function parseChildSnapKey(key: string, localWordByKey: Map<string, SyncRow>) {
   const parts = key.split('|')
   const occKey = parts.pop()
   const articleId = Number(parts.pop())
@@ -59,11 +88,11 @@ function parseChildSnapKey(key, localWordByKey) {
  * 同一业务键在云端存在多行时的防御性选行（历史脏数据），
  * 取 updatedAt（缺省 createdAt）更新的一行作为代表参与差分。
  */
-function betterRep(a, b) {
+function betterRep(a: SyncRow, b: SyncRow): boolean {
   return ts(a.updatedAt || a.createdAt) > ts(b.updatedAt || b.createdAt)
 }
 
-function requireUsername() {
+function requireUsername(): string {
   const auth = useAuthStore()
   const name = auth.username?.trim()
   // 必须同时满足「有用户名」和「有有效会话」：本地身份快照会让 username
@@ -90,7 +119,7 @@ async function getLocalFull() {
 /**
  * 测试与 Supabase 的连接是否可用。
  */
-export async function testConnection() {
+export async function testConnection(): Promise<{ success: boolean; message: string }> {
   const supabase = getSupabase()
   const username = requireUsername()
   try {
@@ -102,21 +131,21 @@ export async function testConnection() {
     if (error) throw error
     return { success: true, message: '连接成功' }
   } catch (error) {
-    throw new Error('连接失败: ' + error.message)
+    throw new Error('连接失败: ' + (error as Error)?.message)
   }
 }
 
 /**
  * 清除该用户在云端的全部数据（物理删除）。
  */
-export async function clearCloud() {
+export async function clearCloud(): Promise<{ success: boolean; message: string }> {
   const supabase = getSupabase()
   const username = requireUsername()
 
   for (const table of TABLES) {
     // delete 同样受服务端 max-rows（默认 1000 行）限制，单次请求删不干净，
     // 循环删除直到该表清零；一轮删除后剩余行数不再下降则报错，防死循环
-    let remaining = null
+    let remaining: number | null = null
     for (;;) {
       const { error } = await supabase.from(table).delete().eq('username', username)
       if (error) throw new Error(`清除云端 ${table} 失败: ${error.message}`)
@@ -159,10 +188,15 @@ export async function clearCloud() {
  * 每轮并行拉取 4 页（order by id 稳定 + range 互不重叠，可安全并行；
  * 超出总量的 range 返回空数组而非错误）。
  */
-async function fetchAllCloud(supabase, table, username, since) {
+async function fetchAllCloud(
+  supabase: SupabaseClient,
+  table: string,
+  username: string,
+  since: string | null
+): Promise<SyncRow[]> {
   const PAGE_SIZE = 1000
   const PARALLEL_PAGES = 4
-  const fetchPage = async (from) => {
+  const fetchPage = async (from: number): Promise<SyncRow[]> => {
     let query = supabase
       .from(table)
       .select('*')
@@ -197,19 +231,19 @@ async function fetchAllCloud(supabase, table, username, since) {
  * 纯插入，并行发出以缩短大账号首次同步耗时（部分块失败时已插入的行
  * 会被下次同步的幂等合并正确处理，无需回滚）。
  */
-async function batchInsert(supabase, table, payloads) {
+async function batchInsert(supabase: SupabaseClient, table: string, payloads: SyncRow[]): Promise<number[]> {
   const CHUNK = 500
   const CONCURRENCY = 3
-  const chunks = []
+  const chunks: SyncRow[][] = []
   for (let i = 0; i < payloads.length; i += CHUNK) chunks.push(payloads.slice(i, i + CHUNK))
-  const idChunks = new Array(chunks.length)
+  const idChunks: number[][] = new Array(chunks.length)
   let next = 0
   const worker = async () => {
     while (next < chunks.length) {
       const idx = next++
       const { data, error } = await supabase.from(table).insert(chunks[idx]).select('id')
       if (error) throw new Error(`推送 ${table} 失败: ${error.message}`)
-      idChunks[idx] = (data || []).map((row) => row.id)
+      idChunks[idx] = (data || []).map((row: any) => row.id)
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker))
@@ -219,7 +253,7 @@ async function batchInsert(supabase, table, payloads) {
 /**
  * 批量物理删除云端行（分批控制 in-filter 长度，避免超出服务端 URL 上限）。
  */
-async function batchHardDelete(supabase, table, ids) {
+async function batchHardDelete(supabase: SupabaseClient, table: string, ids: number[]): Promise<void> {
   const CHUNK = 200
   for (let i = 0; i < ids.length; i += CHUNK) {
     const { error } = await supabase.from(table).delete().in('id', ids.slice(i, i + CHUNK))
@@ -247,7 +281,12 @@ async function batchHardDelete(supabase, table, ids) {
  * 已知取舍：云端删除不留时间戳，无法与本地修改精确比较——
  * 本地改过而云端被删时一律复活（推送），与旧软删方案绝大多数场景行为一致。
  */
-function decideAction(lTs, cTs, sTs, legacyTomb) {
+function decideAction(
+  lTs: number | null,
+  cTs: number | null,
+  sTs: number | null,
+  legacyTomb?: boolean
+): string {
   if (lTs != null && cTs != null) {
     if (lTs > cTs) return 'push-update'
     if (cTs > lTs) return 'pull-update'
@@ -281,7 +320,7 @@ function decideAction(lTs, cTs, sTs, legacyTomb) {
  * 迁移：v7 墓碑机制残留的 tombstones 表在首次新同步时按「本地删除」消化，
  *       云端遗留软删行（deletedAt 非空）统一物理清理。
  */
-export async function syncNow(onProgress) {
+export async function syncNow(onProgress?: SyncProgressCallback): Promise<SyncResult> {
   if (inflightSync) return inflightSync
   inflightSync = (async () => {
     const first = await doSync(onProgress)
@@ -298,7 +337,10 @@ export async function syncNow(onProgress) {
   return inflightSync
 }
 
-async function doSync(onProgress, opts = {}) {
+async function doSync(
+  onProgress?: SyncProgressCallback,
+  opts: { forceFull?: boolean } = {}
+): Promise<SyncResult & { needsFullResync?: boolean }> {
   const supabase = getSupabase()
   const username = requireUsername()
   const startedAt = Date.now()
@@ -307,7 +349,7 @@ async function doSync(onProgress, opts = {}) {
   // 未传回调时静默（手动/自动同步路径不受影响）。
   const PROGRESS_TOTAL = 13
   let progressStep = 0
-  const report = (label) => {
+  const report = (label: string): void => {
     progressStep++
     onProgress?.({
       label,
@@ -329,10 +371,13 @@ async function doSync(onProgress, opts = {}) {
     context_translations: local.contextTranslations.length
   }
   // 快照按表分组：Map(key -> { updatedAt, cloudId })
-  const snapshotByTable = new Map()
+  const snapshotByTable = new Map<string, Map<string, { updatedAt: number | null; cloudId: number | null }>>()
   for (const row of snapshotRows) {
     if (!snapshotByTable.has(row.table)) snapshotByTable.set(row.table, new Map())
-    snapshotByTable.get(row.table).set(row.key, { updatedAt: row.updatedAt, cloudId: row.cloudId ?? null })
+    snapshotByTable.get(row.table)!.set(row.key, {
+      updatedAt: row.updatedAt,
+      cloudId: (row.cloudId ?? null) as number | null
+    })
   }
   const hasSnapshot = snapshotRows.length > 0
   // 旧墓碑键集合（table:key），仅在无快照的首次迁移同步中使用
@@ -348,14 +393,14 @@ async function doSync(onProgress, opts = {}) {
   // ---- 2. 拉取云端（有水位则只取 updatedAt > 水位 的增量行） ----
   // 未变更的行不在增量结果中，由下方快照补全参与差分；云端物理删除不可见（已知取舍）。
   // 云端遗留的软删行（v7 机制残留）过滤为「不存在」，其 id 收集后统一物理清理
-  const cloud = {}
-  const staleCloudIds = { articles: [], words: [], word_marks: [], context_translations: [] }
-  const cloudCounts = {}
+  const cloud: Record<string, SyncRow[]> = {}
+  const staleCloudIds: Record<string, number[]> = { articles: [], words: [], word_marks: [], context_translations: [] }
+  const cloudCounts: Record<string, number> = {}
   report(watermark ? '正在拉取云端增量…' : '正在拉取云端数据…')
   await Promise.all(
     TABLES.map(async (table) => {
       const rows = await fetchAllCloud(supabase, table, username, watermark)
-      cloud[table] = rows.filter((r) => {
+      cloud[table] = rows.filter((r: SyncRow) => {
         if (r.deletedAt) {
           staleCloudIds[table].push(r.id)
           return false
@@ -368,12 +413,12 @@ async function doSync(onProgress, opts = {}) {
   )
 
   // 按表细分的同步统计：stats.pushed.articles 等；bump(kind, table) 自增
-  const stats = { added: {}, updated: {}, deleted: {}, pushed: {} }
-  function bump(kind, table) {
+  const stats: Record<string, Record<string, number>> = { added: {}, updated: {}, deleted: {}, pushed: {} }
+  function bump(kind: string, table: string): void {
     stats[kind][table] = (stats[kind][table] || 0) + 1
   }
   // 待应用云端变更。insert 项携带本地引用，供依赖表解析云端 id。
-  const cloudOps = {
+  const cloudOps: Record<string, { insert: SyncRow[]; update: SyncRow[]; hardDelete: Set<number> }> = {
     articles: { insert: [], update: [], hardDelete: new Set() },
     words: { insert: [], update: [], hardDelete: new Set() },
     word_marks: { insert: [], update: [], hardDelete: new Set() },
@@ -381,32 +426,35 @@ async function doSync(onProgress, opts = {}) {
   }
   // 本次同步成功后要写入的新快照：Map(table -> Map(key -> { updatedAt, cloudId }))
   // cloudId 为对应云端行主键，增量同步时用于补全「云端未改动」的行（更新/删除按 id 直达）
-  const nextSnapshot = new Map()
-  const setSnap = (table, key, t, cloudId = null) => {
+  const nextSnapshot = new Map<string, Map<string, { updatedAt: number | null; cloudId: number | null }>>()
+  const setSnap = (table: string, key: string, t: number | null, cloudId: number | null = null): void => {
     if (!nextSnapshot.has(table)) nextSnapshot.set(table, new Map())
-    nextSnapshot.get(table).set(key, { updatedAt: t, cloudId })
+    nextSnapshot.get(table)!.set(key, { updatedAt: t, cloudId })
   }
   // push-insert 的云端 id 在应用阶段才返回，按 snapKey 回填到对应快照行
-  const fillSnapCloudId = (table, key, cloudId) => {
+  const fillSnapCloudId = (table: string, key: string, cloudId: number | null): void => {
     if (cloudId == null) return
     const rec = nextSnapshot.get(table)?.get(key)
     if (rec) rec.cloudId = cloudId
   }
   // 读取快照中某键上次同步时的 updatedAt（时间戳）
-  const snapTs = (snap, key) => {
+  const snapTs = (
+    snap: Map<string, { updatedAt: number | null; cloudId: number | null }> | undefined,
+    key: string
+  ): number | null => {
     const rec = snap?.get(key)
     return rec ? rec.updatedAt : null
   }
   // 会话内 id 映射（合并期维护的「本地->云端」反向映射，新插入的在应用期回填）
-  const cloudIdOfLocalArticle = new Map() // localArticleId -> cloudArticleId
-  const cloudIdOfLocalWord = new Map() // localWordId -> cloudWordId
+  const cloudIdOfLocalArticle = new Map<number, number>() // localArticleId -> cloudArticleId
+  const cloudIdOfLocalWord = new Map<number, number>() // localWordId -> cloudWordId
   // 增量补全行（快照中「云端未改动且仍存在」的占位记录）与各表补全计数
-  const synthArticleRows = []
-  const synthWordRows = []
-  const synthCounts = { articles: 0, words: 0, word_marks: 0, context_translations: 0 }
+  const synthArticleRows: SyncRow[] = []
+  const synthWordRows: SyncRow[] = []
+  const synthCounts: Record<string, number> = { articles: 0, words: 0, word_marks: 0, context_translations: 0 }
 
   // 本地级联删除（同步语义）
-  async function deleteLocalArticleCascade(localArticleId) {
+  async function deleteLocalArticleCascade(localArticleId: number): Promise<void> {
     // 与 db.js 的 articleService.delete 级联范围保持一致：
     // 划词翻译缓存（selectionTranslations）也挂在文章下，一并清理，
     // 否则云端删除文章后本地残留孤儿缓存行
@@ -418,7 +466,7 @@ async function doSync(onProgress, opts = {}) {
       await db.articles.delete(localArticleId)
     })
   }
-  async function deleteLocalWordCascade(localWordId) {
+  async function deleteLocalWordCascade(localWordId: number): Promise<void> {
     await db.transaction('rw', db.words, db.wordMarks, db.contextTranslations, async () => {
       await db.wordMarks.where('wordId').equals(localWordId).delete()
       await db.contextTranslations.where('wordId').equals(localWordId).delete()
@@ -431,12 +479,12 @@ async function doSync(onProgress, opts = {}) {
   // 性能：块内逐条 db 写（补 uid / 拉回 / 更新 / 级联删）包进单个事务，
   // 避免每条写各自提交一次 IndexedDB 事务（大量数据时提交开销远超写入本身）。
   report('正在合并文章…')
-  const mergeArticles = async () => {
+  const mergeArticles = async (): Promise<void> => {
     // 双方记录一律补齐 uid：本地兜底早期记录；云端异常缺 uid 的生成后随更新回写
     for (const l of local.articles) {
       if (!l.uid) {
         l.uid = newUid()
-        await db.articles.update(l.id, { uid: l.uid })
+        await db.articles.update(l.id!, { uid: l.uid })
       }
     }
     for (const c of cloud.articles) {
@@ -446,8 +494,8 @@ async function doSync(onProgress, opts = {}) {
       }
     }
 
-    const pullArticleToLocal = async (c) => {
-      const id = await db.articles.add({
+    const pullArticleToLocal = async (c: SyncRow): Promise<void> => {
+      const id = (await db.articles.add({
         uid: c.uid,
         title: c.title,
         description: c.description || '',
@@ -455,14 +503,14 @@ async function doSync(onProgress, opts = {}) {
         sortOrder: c.sortOrder ?? null,
         createdAt: c.createdAt || new Date(),
         updatedAt: c.updatedAt || new Date()
-      })
+      }))!
       c.__localArticleId = id
       cloudIdOfLocalArticle.set(id, c.id)
       bump('added', 'articles')
     }
 
-    const localArticleByUid = new Map(local.articles.map((a) => [a.uid, a]))
-    const cloudArticleByUid = new Map()
+    const localArticleByUid = new Map<string, any>(local.articles.map((a) => [a.uid as string, a]))
+    const cloudArticleByUid = new Map<string, SyncRow>()
     for (const c of cloud.articles) {
       const prev = cloudArticleByUid.get(c.uid)
       if (!prev || betterRep(c, prev)) cloudArticleByUid.set(c.uid, c)
@@ -485,8 +533,10 @@ async function doSync(onProgress, opts = {}) {
     const snap = snapshotByTable.get('articles')
     const allUids = new Set([...localArticleByUid.keys(), ...cloudArticleByUid.keys()])
     for (const uid of allUids) {
-      const l = localArticleByUid.get(uid)
-      const c = cloudArticleByUid.get(uid)
+      // l / c 用宽松类型承载：进入具体分支后由 decideAction 保证对应记录存在，
+      // 且两者字段随来源（本地实体 / 云端行）而异，逐处断言收益低
+      const l: any = localArticleByUid.get(uid)
+      const c: any = cloudArticleByUid.get(uid)
       const key = `u:${uid}`
       const lTs = l ? ts(l.updatedAt) : null
       const cTs = c ? ts(c.updatedAt) : null
@@ -569,21 +619,23 @@ async function doSync(onProgress, opts = {}) {
   report('正在合并单词…')
   // 每个云端单词的本地文章 id（文章阶段已给云端文章记录标 __localArticleId；
   // 增量补全的文章占位行也在其中，故一并纳入映射表）
-  const cloudArticleById = new Map([...cloud.articles, ...synthArticleRows].map((c) => [c.id, c]))
+  const cloudArticleById = new Map<number, SyncRow>(
+    [...cloud.articles, ...synthArticleRows].map((c) => [c.id, c])
+  )
   for (const w of cloud.words) {
     w.__localArticleId = cloudArticleById.get(w.articleId)?.__localArticleId
   }
-  const localWordByKey = new Map()
-  const localWordById = new Map()
+  const localWordByKey = new Map<string, any>()
+  const localWordById = new Map<number, any>()
   for (const w of wordsNow) {
-    localWordById.set(w.id, w)
+    localWordById.set(w.id!, w)
     const k = stableKey('words', w)
     if (!localWordByKey.has(k) || ts(w.updatedAt) > ts(localWordByKey.get(k).updatedAt)) {
       localWordByKey.set(k, w)
     }
   }
-  const mergeWords = async () => {
-    const cloudWordByKey = new Map()
+  const mergeWords = async (): Promise<void> => {
+    const cloudWordByKey = new Map<string, SyncRow>()
     for (const w of cloud.words) {
       if (w.__localArticleId == null) continue
       const k = stableKey('words', { word: w.word, articleId: w.__localArticleId })
@@ -613,8 +665,8 @@ async function doSync(onProgress, opts = {}) {
     const snap = snapshotByTable.get('words')
     const allKeys = new Set([...localWordByKey.keys(), ...cloudWordByKey.keys()])
     for (const key of allKeys) {
-      const l = localWordByKey.get(key)
-      const c = cloudWordByKey.get(key)
+      const l: any = localWordByKey.get(key)
+      const c: any = cloudWordByKey.get(key)
       const lTs = l ? ts(l.updatedAt) : null
       const cTs = c ? ts(c.updatedAt) : null
       const action = decideAction(lTs, cTs, snapTs(snap, key), !hasSnapshot && legacyTombKeys.has(`words:${key}`))
@@ -669,14 +721,14 @@ async function doSync(onProgress, opts = {}) {
           setSnap('words', key, lTs)
           break
         case 'pull-insert': {
-          const id = await db.words.add({
+          const id = (await db.words.add({
             word: c.word.toLowerCase(),
             articleId: c.__localArticleId,
             definitions: c.definitions || [],
             examples: c.examples || [],
             source: c.source || '',
             updatedAt: c.updatedAt || new Date()
-          })
+          }))!
           const rec = { id, word: c.word.toLowerCase(), articleId: c.__localArticleId, definitions: c.definitions || [], examples: c.examples || [], source: c.source || '', updatedAt: c.updatedAt }
           localWordByKey.set(key, rec)
           localWordById.set(id, rec)
@@ -1136,7 +1188,7 @@ async function doSync(onProgress, opts = {}) {
 
   // ---- 11. 汇总提示（按表细分） ----
   report('同步完成')
-  const fmt = (label, counts) => {
+  const fmt = (label: string, counts: Record<string, number>): string => {
     const detail = TABLES
       .filter((t) => counts[t])
       .map((t) => `${counts[t]}${TABLE_LABELS[t]}`)

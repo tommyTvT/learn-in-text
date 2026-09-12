@@ -3,7 +3,16 @@ import { ref, computed, onMounted } from 'vue'
 import ULink from '../../components/Common/ULink.vue'
 import { usePageRoute } from '../../composables/routerShim'
 import PageLayout from '../../components/Common/PageLayout.vue'
-import { useSettingsStore } from '../../stores/settings'
+import {
+  useSettingsStore,
+  DEFAULT_MAX_CONCURRENCY,
+  DEFAULT_REQUEST_TIMEOUT,
+  DEFAULT_BASIC_INFO_MAX_TOKENS,
+  DEFAULT_CONTEXT_MAX_TOKENS,
+  DEFAULT_ARTICLE_MAX_TOKENS,
+  DEFAULT_SELECTION_MAX_TOKENS,
+  DEFAULT_SELECTION_CHAT_MAX_TOKENS
+} from '../../stores/settings'
 import { useAuthStore } from '../../stores/auth'
 import { useWordStore } from '../../stores/word'
 import { exportService } from '../../services/db'
@@ -14,6 +23,8 @@ import AIConfigModal from '../../components/AI/AIConfigModal.vue'
 import ModelConfigModal from '../../components/AI/ModelConfigModal.vue'
 import CacheClearModal from '../../components/Common/CacheClearModal.vue'
 import { alert, confirmDialog } from '../../services/dialog'
+import { toast } from '../../services/toast'
+import { errorText } from '../../services/errors'
 import { pickFiles } from '../../services/filePicker'
 usePageRoute()
 
@@ -22,6 +33,40 @@ const authStore = useAuthStore()
 const wordStore = useWordStore()
 
 const isLoggedIn = computed(() => authStore.isLoggedIn)
+
+// 云存储是否已配置（来自 .env 的 VITE_ 变量，或历史数据中手动写入的值）。
+// 未配置时云同步整体不可用：卡片上必须给出可执行的配置指引，
+// 否则用户只会看到三个禁用按钮却不知道去哪里配置（报错文案原先也指向并不存在的设置项）。
+const cloudConfigured = computed(() =>
+  !!String(settingsStore.supabaseUrl || '').trim() && !!String(settingsStore.supabaseAnonKey || '').trim()
+)
+
+// ---- 数值设置校验 ----
+// HTML 的 min/max 对已渲染的值没有任何约束力：输入 0 / 负数 / 清空会原样写进 store，
+// 进而破坏并发分批（i += concurrency）、请求超时与 max_tokens。这里在失焦/变更时
+// 解析、按范围夹取，非法值回退默认值，并给出可见提示。
+const NUMBER_RULES = {
+  maxConcurrency: { label: '最大并发数', min: 1, max: 100, fallback: DEFAULT_MAX_CONCURRENCY },
+  requestTimeout: { label: '请求超时（秒）', min: 1, max: 300, fallback: DEFAULT_REQUEST_TIMEOUT },
+  basicInfoMaxTokens: { label: '单词信息 max_tokens', min: 1, max: 32000, fallback: DEFAULT_BASIC_INFO_MAX_TOKENS },
+  contextMaxTokens: { label: '「在文中」释义 max_tokens', min: 1, max: 32000, fallback: DEFAULT_CONTEXT_MAX_TOKENS },
+  articleMaxTokens: { label: '文章生成 max_tokens', min: 1, max: 32000, fallback: DEFAULT_ARTICLE_MAX_TOKENS },
+  selectionMaxTokens: { label: '划词翻译 max_tokens', min: 1, max: 32000, fallback: DEFAULT_SELECTION_MAX_TOKENS },
+  selectionChatMaxTokens: { label: '追问解析 max_tokens', min: 1, max: 32000, fallback: DEFAULT_SELECTION_CHAT_MAX_TOKENS }
+}
+
+function normalizeNumberField(key) {
+  const rule = NUMBER_RULES[key]
+  const before = Number(settingsStore[key])
+  const parsed = Math.round(Number(settingsStore[key]))
+  const next = !Number.isFinite(parsed) || parsed <= 0
+    ? rule.fallback
+    : Math.min(rule.max, Math.max(rule.min, parsed))
+  if (next !== before || !Number.isFinite(before)) {
+    settingsStore[key] = next
+    toast(`${rule.label}已调整为 ${next}（允许 ${rule.min}-${rule.max}）`, 'none')
+  }
+}
 
 const aiConfigOpen = ref(false)
 const modelConfigType = ref(null)
@@ -162,9 +207,9 @@ async function exportAllData() {
   exporting.value = true
   try {
     await downloadFullBackup(settingsStore.exportSettings())
-    await alert('导出成功')
+    await toast('已导出备份（含 AI 密钥，请妥善保管）')
   } catch (error) {
-    await alert('导出失败: ' + error.message)
+    await toast(errorText(error, '导出失败，请重试'), 'error')
   } finally {
     exporting.value = false
   }
@@ -184,6 +229,14 @@ async function importAllData() {
 
   importing.value = true
   const reader = new FileReader()
+  // 读取失败/中断也必须复位状态：此前只监听 onload，
+  // 失败时按钮会永久停在「导入中...」且保持禁用，用户无从重试
+  const failImport = (message) => {
+    importing.value = false
+    void alert(message)
+  }
+  reader.onerror = () => failImport('导入失败：文件读取失败，请重试')
+  reader.onabort = () => failImport('导入已取消')
   reader.onload = async (e) => {
     try {
       const data = JSON.parse(e.target.result)
@@ -197,12 +250,17 @@ async function importAllData() {
         await alert('导入完成')
       }
     } catch (error) {
-      await alert('导入失败: ' + error.message)
+      await alert('导入失败: ' + errorText(error, '未知错误'))
     } finally {
       importing.value = false
     }
   }
-  reader.readAsText(file)
+  try {
+    reader.readAsText(file)
+  } catch (error) {
+    importing.value = false
+    await alert('导入失败: ' + errorText(error, '文件读取失败'))
+  }
 }
 
 async function loadStats() {
@@ -265,7 +323,7 @@ onMounted(() => {
             to="/login"
             class="shrink-0 px-4 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
           >
-            登录 / 注册
+            登录
           </ULink>
         </div>
       </template>
@@ -282,6 +340,7 @@ onMounted(() => {
             v-for="(label, key) in { system: '跟随系统', light: '浅色', dark: '深色' }"
             :key="key"
             @click="settingsStore.theme = key; settingsStore.applyTheme()"
+            :aria-pressed="settingsStore.theme === key"
             :class="[
               'flex-1 px-4 py-2.5 rounded-md border text-sm font-medium transition-colors',
               settingsStore.theme === key
@@ -356,6 +415,7 @@ onMounted(() => {
               <button
                 type="button"
                 role="switch"
+                aria-label="划词翻译"
                 :aria-checked="settingsStore.enableSelectionTranslation"
                 @click="settingsStore.enableSelectionTranslation = !settingsStore.enableSelectionTranslation"
                 :class="[
@@ -385,6 +445,7 @@ onMounted(() => {
               <button
                 type="button"
                 role="switch"
+                aria-label="合批请求"
                 :aria-checked="settingsStore.enableBatchWordRequest"
                 @click="settingsStore.enableBatchWordRequest = !settingsStore.enableBatchWordRequest"
                 :class="[
@@ -414,6 +475,7 @@ onMounted(() => {
               <button
                 type="button"
                 role="switch"
+                aria-label="按需生成词义"
                 :aria-checked="settingsStore.enableOnDemandWordGeneration"
                 @click="settingsStore.enableOnDemandWordGeneration = !settingsStore.enableOnDemandWordGeneration"
                 :class="[
@@ -444,6 +506,7 @@ onMounted(() => {
               <button
                 type="button"
                 role="switch"
+                aria-label="点击单词自动发音"
                 :aria-checked="settingsStore.autoPronounce"
                 @click="settingsStore.autoPronounce = !settingsStore.autoPronounce"
                 :class="[
@@ -468,6 +531,17 @@ onMounted(() => {
       <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100 mb-4">云同步</h2>
 
+        <!-- 未配置云存储时给出可执行的指引：此前报错文案指向设置页，而设置页并没有对应输入项 -->
+        <p
+          v-if="!cloudConfigured"
+          class="text-xs leading-relaxed text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-md px-3 py-2 mb-4"
+        >
+          当前未配置云存储，云同步不可用（本地功能不受影响）。如需启用，请在项目根目录的
+          <span class="font-mono">.env</span> 中填写
+          <span class="font-mono">VITE_SUPABASE_URL</span> 与
+          <span class="font-mono">VITE_SUPABASE_ANON_KEY</span> 后重新构建。
+        </p>
+
         <div class="space-y-4">
           <div v-if="isLoggedIn" class="border-t border-gray-200 dark:border-neutral-800 pt-4">
             <div class="flex items-start justify-between gap-4">
@@ -477,6 +551,7 @@ onMounted(() => {
               <button
                 type="button"
                 role="switch"
+                aria-label="自动同步"
                 :aria-checked="settingsStore.autoSync"
                 @click="settingsStore.autoSync = !settingsStore.autoSync"
                 :class="[
@@ -569,6 +644,7 @@ onMounted(() => {
       <div class="bg-white dark:bg-neutral-900 rounded-lg shadow-sm border border-gray-200 dark:border-neutral-800 p-5">
         <button
           @click="showDevOptions = !showDevOptions"
+          :aria-expanded="showDevOptions"
           class="flex items-center justify-between w-full"
         >
           <h2 class="text-xl font-semibold text-gray-900 dark:text-neutral-100">开发者选项</h2>
@@ -631,6 +707,8 @@ onMounted(() => {
                   type="number"
                   min="1"
                   max="100"
+                  aria-label="最大并发数"
+                  @blur="normalizeNumberField('maxConcurrency')"
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
@@ -643,6 +721,8 @@ onMounted(() => {
                   v-model.number="settingsStore.requestTimeout"
                   type="number"
                   min="1"
+                  aria-label="请求超时（秒）"
+                  @blur="normalizeNumberField('requestTimeout')"
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
@@ -655,6 +735,8 @@ onMounted(() => {
                   v-model.number="settingsStore.basicInfoMaxTokens"
                   type="number"
                   min="1"
+                  aria-label="单词信息 max_tokens"
+                  @blur="normalizeNumberField('basicInfoMaxTokens')"
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
@@ -667,6 +749,8 @@ onMounted(() => {
                   v-model.number="settingsStore.contextMaxTokens"
                   type="number"
                   min="1"
+                  aria-label="「在文中」释义 max_tokens"
+                  @blur="normalizeNumberField('contextMaxTokens')"
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
@@ -679,6 +763,8 @@ onMounted(() => {
                   v-model.number="settingsStore.articleMaxTokens"
                   type="number"
                   min="1"
+                  aria-label="文章生成 max_tokens"
+                  @blur="normalizeNumberField('articleMaxTokens')"
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
@@ -691,6 +777,8 @@ onMounted(() => {
                   v-model.number="settingsStore.selectionMaxTokens"
                   type="number"
                   min="1"
+                  aria-label="划词翻译 max_tokens"
+                  @blur="normalizeNumberField('selectionMaxTokens')"
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
@@ -703,6 +791,8 @@ onMounted(() => {
                   v-model.number="settingsStore.selectionChatMaxTokens"
                   type="number"
                   min="1"
+                  aria-label="追问解析 max_tokens"
+                  @blur="normalizeNumberField('selectionChatMaxTokens')"
                   class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p class="text-xs text-gray-500 dark:text-neutral-400 mt-1">
@@ -726,6 +816,7 @@ onMounted(() => {
               <button
                 type="button"
                 role="switch"
+                aria-label="调试模式"
                 :aria-checked="settingsStore.debugMode"
                 @click="settingsStore.debugMode = !settingsStore.debugMode"
                 :class="[
@@ -753,7 +844,8 @@ onMounted(() => {
               {{ cloudClearing ? '清除中...' : '清除云端数据' }}
             </button>
             <p class="text-xs text-gray-500 dark:text-neutral-400 mt-2">
-              删除该用户名在云端的所有数据（文章、单词、标记、翻译），不影响本地数据，此操作不可恢复
+              删除该用户名在云端的所有数据（文章、单词、标记、翻译），不影响本地数据，此操作不可恢复。
+              清除会同时重置同步记录，因此在自动同步开启时，本机数据会在随后的自动同步中重新上传到云端。
             </p>
             <div
               v-if="devCloudResult"

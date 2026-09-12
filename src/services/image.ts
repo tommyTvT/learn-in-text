@@ -6,16 +6,16 @@ const MAX_ORIGINAL_BYTES = 3.5 * 1024 * 1024
 const JPEG_QUALITY = 0.9
 
 /** 将 File 读取为 Data URL */
-export function fileToDataUrl(file) {
+export function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
+    reader.onload = () => resolve(reader.result as string)
     reader.onerror = () => reject(reader.error || new Error('读取文件失败'))
     reader.readAsDataURL(file)
   })
 }
 
-function loadImage(src) {
+function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.onload = () => resolve(img)
@@ -29,7 +29,7 @@ function loadImage(src) {
  * - 小图（边长 ≤ 2000px 且体积 ≤ 3.5MB）原样返回
  * - 大图缩放至最长边 2000px：无损格式（png/gif/webp）导出 PNG，照片导出 JPEG
  */
-export async function prepareImageForAI(file) {
+export async function prepareImageForAI(file: File): Promise<string> {
   if (!file || !/^image\//.test(file.type || '')) {
     throw new Error('请选择图片文件')
   }

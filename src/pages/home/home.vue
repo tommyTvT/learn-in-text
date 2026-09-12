@@ -7,7 +7,9 @@ import { GripVertical } from 'lucide-vue-next'
 import { useArticleStore } from '../../stores/article'
 import { useWordStore } from '../../stores/word'
 import EditArticleModal from '../../components/Article/EditArticleModal.vue'
-import { alert, confirmDialog } from '../../services/dialog'
+import { confirmDialog } from '../../services/dialog'
+import { toast } from '../../services/toast'
+import { errorText } from '../../services/errors'
 
 usePageRoute()
 const router = useRouter()
@@ -42,7 +44,10 @@ function setupSortable() {
       const to = evt.newIndex
       if (from == null || to == null || from === to) return
       nextTick(() => {
-        articleStore.moveArticle(from, to)
+        // 内存顺序已先行变更，写库失败必须显形（否则刷新后顺序静默回退）
+        articleStore.moveArticle(from, to).catch((e) => {
+          toast(errorText(e, '排序保存失败，刷新后顺序可能回退'), 'error')
+        })
       })
     }
   })
@@ -101,7 +106,9 @@ function onHandleTouchEnd() {
   if (touchDrag?.active && orderDirty) {
     orderDirty = false
     suppressClickUntil = Date.now() + 300
-    articleStore.persistArticleOrder()
+    articleStore.persistArticleOrder().catch((e) => {
+      toast(errorText(e, '排序保存失败，刷新后顺序可能回退'), 'error')
+    })
   }
   touchDrag = null
   touchDragIndex.value = -1
@@ -240,10 +247,25 @@ function resolveDropIndex(current, clientY) {
   return target
 }
 
-onMounted(async () => {
-  await articleStore.fetchArticles()
-  await nextTick()
-  setupSortable()
+// 首屏加载三态：loading（store）/ error（本页）/ empty。
+// fetchArticles 自身不捕获异常，读库失败必须在这里显形，
+// 否则页面会落入空态、把「加载失败」显示成「还没有文章」。
+const loadError = ref('')
+
+async function initList() {
+  loadError.value = ''
+  try {
+    await articleStore.fetchArticles()
+  } catch (e) {
+    loadError.value = errorText(e, '文章列表加载失败，请重试')
+  } finally {
+    await nextTick()
+    setupSortable()
+  }
+}
+
+onMounted(() => {
+  initList()
 })
 
 // 文章从 0 变为有（或删光后重新新增）时列表容器会重新挂载，需要重建拖拽实例
@@ -271,8 +293,12 @@ function openArticle(id) {
 
 async function deleteArticle(id, event) {
   event.stopPropagation()
-  if (await confirmDialog('确定要删除这篇文章吗？')) {
+  if (!await confirmDialog('确定要删除这篇文章吗？')) return
+  try {
     await articleStore.deleteArticle(id)
+    await toast('文章已删除')
+  } catch (e) {
+    await toast(errorText(e, '删除失败，请重试'), 'error')
   }
 }
 
@@ -280,9 +306,14 @@ async function exportArticle(articleId, title, event) {
   event.stopPropagation()
   try {
     await wordStore.exportArticleAndDownload(articleId, title)
-  } catch (error) {
-    await alert('导出失败: ' + error.message)
+    await toast('文章备份已导出')
+  } catch (e) {
+    await toast(errorText(e, '导出失败，请重试'), 'error')
   }
+}
+
+async function onArticleSaved() {
+  await toast('已保存')
 }
 
 const editingArticle = ref(null)
@@ -338,15 +369,31 @@ function formatDate(date) {
       <div v-if="articleStore.loading" class="px-4 sm:px-0 text-center py-8 text-gray-500 dark:text-neutral-400">
         加载中...
       </div>
+      <!-- 错误态：与空态区分开，避免「读取失败」被显示成「没有数据」 -->
+      <div v-else-if="loadError" class="px-4 sm:px-0 text-center py-8">
+        <p class="text-sm text-red-500 dark:text-red-400">{{ loadError }}</p>
+        <button
+          @click="initList"
+          class="mt-3 px-4 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+        >
+          重试
+        </button>
+      </div>
       <div v-else-if="articleStore.articles.length === 0" class="px-4 sm:px-0 text-center py-8 text-gray-500 dark:text-neutral-400">
         还没有文章，点击右上角新建或 AI 生成
       </div>
       <div v-else ref="listRef" class="article-list">
+        <!-- 卡片可点击：必须同时可聚焦、可回车/空格触发，否则键盘与读屏用户无法打开文章 -->
         <div
           v-for="(article, index) in articleStore.articles"
           :key="article.id"
           :class="{ 'is-dragging': touchDragIndex === index }"
+          role="button"
+          tabindex="0"
+          :aria-label="`打开文章：${article.title}`"
           @click="openArticle(article.id)"
+          @keydown.enter.prevent="openArticle(article.id)"
+          @keydown.space.prevent="openArticle(article.id)"
           class="article-item px-4 py-2.5 sm:p-3.5 border-0 sm:border border-gray-200 dark:border-neutral-800 rounded-none sm:rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-neutral-800/60 transition-colors"
         >
           <div class="flex justify-between items-start">
@@ -373,6 +420,7 @@ function formatDate(date) {
                 @click="startEdit(article, $event)"
                 class="text-gray-400 hover:text-blue-500"
                 title="编辑文章"
+                aria-label="编辑文章"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -382,6 +430,7 @@ function formatDate(date) {
                 @click="exportArticle(article.id, article.title, $event)"
                 class="text-gray-400 hover:text-blue-500"
                 title="导出文章备份"
+                aria-label="导出文章备份"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -390,6 +439,8 @@ function formatDate(date) {
               <button
                 @click="deleteArticle(article.id, $event)"
                 class="text-gray-400 hover:text-red-500"
+                title="删除文章"
+                aria-label="删除文章"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -405,6 +456,7 @@ function formatDate(date) {
       v-if="editingArticle"
       :article="editingArticle"
       @close="editingArticle = null"
+      @saved="onArticleSaved"
     />
   </div>
   </PageLayout>

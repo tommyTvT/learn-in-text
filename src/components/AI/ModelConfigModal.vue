@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
+import { useDialogA11y } from '../../composables/useDialogA11y'
 import { fetchModels, testConnection } from '../../services/ai'
 import { X, ChevronDown, Loader2 } from 'lucide-vue-next'
 
@@ -141,14 +142,23 @@ function handleOverlayClick() {
   emit('close')
 }
 
-function handleEsc(e) {
-  if (e.key === 'Escape' && props.open) {
-    emit('close')
+// 弹窗无障碍：Esc 关闭、打开时焦点移入面板、关闭时焦点归还、Tab 循环
+// （composable 内部已做非 H5 端守卫，替代此前无守卫的 window 监听）
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => props.open,
+  onClose: () => emit('close'),
+  panelRef
+})
+
+// 模型输入框的 Esc：下拉展开时只关闭下拉并阻止冒泡，
+// 否则会连整个弹窗一起关掉（用户本意只是收起下拉）
+function onModelEsc(e) {
+  if (modelDropdownOpen.value) {
+    e.stopPropagation()
+    modelDropdownOpen.value = false
   }
 }
-
-onMounted(() => window.addEventListener('keydown', handleEsc))
-onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
 </script>
 
 <template>
@@ -163,7 +173,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
 
     <Transition name="ai-panel">
       <div v-if="open" class="fixed inset-0 z-50">
-        <div class="relative h-full w-full bg-white dark:bg-neutral-900 flex flex-col overflow-hidden">
+        <div
+          ref="panelRef"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="`${title}配置`"
+          class="relative h-full w-full bg-white dark:bg-neutral-900 flex flex-col overflow-hidden"
+        >
           <div class="sm:hidden pt-[env(safe-area-inset-top)] bg-white dark:bg-neutral-900"></div>
 
           <!-- 头部 -->
@@ -208,7 +224,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
                       @input="onModelInput"
                       @focus="openModelDropdown"
                       @blur="closeModelDropdown"
-                      @keydown.esc="modelDropdownOpen = false"
+                      @keydown.esc="onModelEsc"
                       type="text"
                       :placeholder="isVision ? '留空则复用文本模型' : '模型名称，如 deepseek-v4-flash'"
                       class="w-full px-3 py-2 pr-8 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"

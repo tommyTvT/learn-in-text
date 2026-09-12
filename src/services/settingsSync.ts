@@ -1,4 +1,5 @@
 import { getSupabase } from '../lib/supabase'
+import type { CloudSettingsRecord, SettingsData } from '../types'
 
 /**
  * 设置同步 API 层：读写云端 user_settings 表。
@@ -6,7 +7,7 @@ import { getSupabase } from '../lib/supabase'
  */
 
 /** 拉取云端设置（返回 null 表示云端无记录） */
-export async function fetchCloudSettings(username) {
+export async function fetchCloudSettings(username: string): Promise<CloudSettingsRecord | null> {
   const supabase = getSupabase()
   const { data, error } = await supabase
     .from('user_settings')
@@ -22,7 +23,11 @@ export async function fetchCloudSettings(username) {
 }
 
 /** 推送本地设置到云端（upsert，按 username 唯一） */
-export async function pushCloudSettings(username, settings, updatedAt) {
+export async function pushCloudSettings(
+  username: string,
+  settings: Partial<SettingsData> | Record<string, unknown>,
+  updatedAt: number
+): Promise<void> {
   const supabase = getSupabase()
   const payload = {
     username,

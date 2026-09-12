@@ -1,6 +1,7 @@
 ﻿<script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useSettingsStore } from '../../stores/settings'
+import { useDialogA11y } from '../../composables/useDialogA11y'
 import { X, Plus, Trash2, Eye, EyeOff, Bot } from 'lucide-vue-next'
 import { alert, confirmDialog } from '../../services/dialog'
 
@@ -54,11 +55,15 @@ async function handleRemoveProvider(id) {
 function handleOverlayClick() {
   emit('close')
 }
-function handleEsc(e) {
-  if (e.key === 'Escape' && props.open) {
-    emit('close')
-  }
-}
+
+// 弹窗无障碍：Esc 关闭、打开时焦点移入面板、关闭时焦点归还、Tab 循环
+// （composable 内部已做非 H5 端守卫，替代此前无守卫的 window 监听）
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => props.open,
+  onClose: () => emit('close'),
+  panelRef
+})
 
 watch(() => props.open, (val) => {
   if (val) {
@@ -67,8 +72,6 @@ watch(() => props.open, (val) => {
   }
 })
 
-onMounted(() => window.addEventListener('keydown', handleEsc))
-onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
 </script>
 
 <template>
@@ -84,7 +87,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
     <Transition name="ai-panel">
       <div v-if="open" class="fixed inset-0 z-50">
         <!-- 全屏界面：从下到上滑入铺满屏幕 -->
-        <div class="relative h-full w-full bg-white dark:bg-neutral-900 flex flex-col overflow-hidden">
+        <div
+          ref="panelRef"
+          role="dialog"
+          aria-modal="true"
+          aria-label="供应商管理"
+          class="relative h-full w-full bg-white dark:bg-neutral-900 flex flex-col overflow-hidden"
+        >
           <div class="sm:hidden pt-[env(safe-area-inset-top)] bg-white dark:bg-neutral-900"></div>
 
           <!-- 头部 -->
@@ -200,6 +209,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleEsc))
                     <button
                       @click="showApiKey = !showApiKey"
                       class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-sm text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-200 transition-colors cursor-pointer"
+                      :aria-pressed="showApiKey"
+                      :aria-label="showApiKey ? '隐藏 API Key' : '显示 API Key'"
                     >
                       <component :is="showApiKey ? EyeOff : Eye" class="w-4 h-4" />
                     </button>

@@ -9,7 +9,7 @@ import AppHeader from './AppHeader.vue'
 import MobileTabBar from './MobileTabBar.vue'
 
 // 全局页面布局（承载原 App.vue 的模板结构）：
-// - bare：裸布局（登录/注册/邮箱验证），不渲染任何导航
+// - bare：裸布局（登录/邮箱验证），不渲染任何导航
 // - hideTab：隐藏底部 TabBar（阅读页用，避免遮挡内容）
 defineProps({
   bare: { type: Boolean, default: false },
@@ -33,7 +33,7 @@ function onAnimEnd() {
 }
 
 // 认证页路径：自带归属决策流程，本组件不再重复引导
-const AUTH_PATHS = ['/login', '/register', '/email-verified']
+const AUTH_PATHS = ['/login', '/email-verified']
 
 /**
  * 上次登录的归属决策未完成（弹窗期间关闭/离开页面）时，

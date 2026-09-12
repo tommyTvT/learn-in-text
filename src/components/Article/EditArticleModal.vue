@@ -2,6 +2,8 @@
 import { ref, watch } from 'vue'
 import { useArticleStore } from '../../stores/article'
 import { alert, confirmDialog } from '../../services/dialog'
+import { errorText } from '../../services/errors'
+import { useDialogA11y } from '../../composables/useDialogA11y'
 
 const props = defineProps({
   article: {
@@ -11,6 +13,18 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'saved'])
+
+// 弹窗无障碍：Esc 关闭（保存中禁止）、打开时焦点移入、关闭时归还、Tab 循环。
+// 本组件挂载即打开（父级 v-if 控制显隐），isOpen 恒为 true。
+const panelRef = ref(null)
+useDialogA11y({
+  isOpen: () => true,
+  onClose: () => {
+    if (!saving.value) emit('close')
+  },
+  panelRef,
+  canClose: () => !saving.value
+})
 
 const articleStore = useArticleStore()
 
@@ -25,6 +39,7 @@ watch(() => props.article, (a) => {
 })
 
 async function save() {
+  if (saving.value) return
   const trimmedTitle = title.value.trim()
   if (!trimmedTitle) {
     await alert('标题不能为空')
@@ -38,18 +53,34 @@ async function save() {
     })
     emit('saved')
     emit('close')
+  } catch (e) {
+    // 此前只有 try/finally：写库失败时异常直接外抛，弹窗既不关闭也不提示，
+    // 用户以为「点了没反应」
+    await alert('保存失败：' + errorText(e, '请重试'))
   } finally {
     saving.value = false
   }
+}
+
+// 回车保存：中文等输入法用回车确认候选词，不能当作提交（否则会保存半截标题）
+function onTitleEnter(e) {
+  if (e?.isComposing) return
+  save()
 }
 </script>
 
 <template>
   <div
-    class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+    class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
     @click.self="emit('close')"
   >
-    <div class="bg-white dark:bg-neutral-900 rounded-lg p-5 max-w-lg w-full mx-4">
+    <div
+      ref="panelRef"
+      role="dialog"
+      aria-modal="true"
+      aria-label="编辑文章"
+      class="bg-white dark:bg-neutral-900 rounded-lg p-5 max-w-lg w-full mx-4"
+    >
       <h3 class="text-lg font-semibold text-gray-900 dark:text-neutral-100 mb-4">编辑文章</h3>
       <div class="space-y-4">
         <div>
@@ -58,8 +89,7 @@ async function save() {
             v-model="title"
             type="text"
             placeholder="输入文章标题"
-            @keyup.enter="save"
-            @keyup.esc="emit('close')"
+            @keyup.enter="onTitleEnter"
             class="w-full px-3 py-2 border border-gray-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-gray-900 dark:text-neutral-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder-gray-400 dark:placeholder-neutral-500"
             autofocus
           />
