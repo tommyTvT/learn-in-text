@@ -4,6 +4,8 @@ logs
 
 # 调试/过程产物（不追踪）
 .playwright-cli/
+# TypeScript 配置对照实验沙箱（临时验证用）
+.tscheck/
 shots/
 home.yaml
 docs/
